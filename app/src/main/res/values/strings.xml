@@ -1,3 +1,25 @@
 <resources>
     <string name="app_name">RuMDA</string>
+    <string name="adb_flow_title">Wireless ADB Setup (Debug Screen)</string>
+    <string name="adb_flow_hint">Recommended order: 1) notifications, 2) wireless debugging settings, 3) start pairing service, 4) auto-connect, 5) run command.</string>
+    <string name="adb_flow_need_notifications">Notification permission is required for pairing input. Grant it first, then continue.</string>
+    <string name="adb_btn_notifications">1) Enable notification permission</string>
+    <string name="adb_btn_wireless_settings">2) Open wireless debugging settings</string>
+    <string name="adb_btn_pair">3) Start pairing service</string>
+    <string name="adb_btn_connect">4) Auto-connect</string>
+    <string name="adb_btn_run_date">5) Run \"date\"</string>
+    <string name="adb_btn_start_loop">6) Start 10s background loop</string>
+    <string name="adb_btn_stop_loop">7) Stop background loop</string>
+    <string name="adb_state_template">ADB state: %1$s</string>
+    <string name="adb_output_placeholder">Command output will appear here.</string>
+    <string name="notification_channel_adb_loop">ADB Background Loop</string>
+    <string name="notification_adb_loop_title">RuMDA background ADB loop</string>
+    <string name="notification_channel_adb_pairing">ADB Pairing</string>
+    <string name="notification_adb_pairing_succeed_title">ADB Pairing Successful</string>
+    <string name="notification_adb_pairing_failed_title">ADB Pairing Failed</string>
+    <string name="notification_adb_pairing_input_code">Enter pairing code</string>
+    <string name="notification_adb_pairing_searching_for_service_title">Searching for ADB pairing service</string>
+    <string name="notification_adb_pairing_stop_searching">Stop searching</string>
+    <string name="notification_adb_pairing_service_found_title">ADB pairing service found on port %d</string>
+    <string name="notification_adb_pairing_working_title">Pairing with ADB service</string>
 </resources>
