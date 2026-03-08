@@ -17,6 +17,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.vionfrancois.rumda.cadb.AdbCommandService
 import com.vionfrancois.rumda.cadb.AdbManager
+import com.vionfrancois.rumda.collectors.APKCollector
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -83,7 +84,20 @@ class MainActivity : AppCompatActivity() {
         }
         val commandButton = Button(this).apply {
             text = getString(R.string.adb_btn_run_date)
-            setOnClickListener { adbManager.runCommand("date") }
+            setOnClickListener {
+                lifecycleScope.launch {
+                    outputText.text = adbManager.runCommand("date")
+                }
+            }
+        }
+        val collectApkButton = Button(this).apply {
+            text = getString(R.string.adb_btn_collect_apk)
+            setOnClickListener {
+                lifecycleScope.launch {
+                    val collector = APKCollector(adbManager)
+                    outputText.text = collector.collect()
+                }
+            }
         }
         val startLoopButton = Button(this).apply {
             text = getString(R.string.adb_btn_start_loop)
@@ -124,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(pairButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(connectButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(commandButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        root.addView(collectApkButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(startLoopButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(stopLoopButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -135,11 +150,6 @@ class MainActivity : AppCompatActivity() {
                 launch {
                     adbManager.adbState.collect {
                         statusText.text = getString(R.string.adb_state_template, it.name)
-                    }
-                }
-                launch {
-                    adbManager.lastCommandOutput.collect {
-                        outputText.text = it
                     }
                 }
             }

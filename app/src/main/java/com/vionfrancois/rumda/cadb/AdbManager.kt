@@ -5,9 +5,11 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import io.github.muntashirakon.adb.AdbPairingRequiredException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -18,9 +20,6 @@ class AdbManager(private val appContext: Context) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val _adbState = MutableStateFlow<AdbState>(AdbState.Initial)
     val adbState: StateFlow<AdbState> = _adbState.asStateFlow()
-
-    private val _lastCommandOutput = MutableStateFlow("")
-    val lastCommandOutput: StateFlow<String> = _lastCommandOutput.asStateFlow()
 
     private val adbConnectionManager: AdbConnectionManager =
         AdbConnectionManager.getInstance(appContext) as AdbConnectionManager
@@ -104,43 +103,40 @@ class AdbManager(private val appContext: Context) {
         }
     }
 
-    fun runCommand(command: String) {
-        executor.submit {
-            try {
-                if (!adbConnectionManager.isConnected) {
-                    _lastCommandOutput.value = "Not connected. Pair and connect first."
-                    return@submit
-                }
-                val stream = adbConnectionManager.openStream("shell:$command")
-                val out = StringBuilder()
-                try {
-                    stream.openInputStream().bufferedReader().use { reader ->
-                        val buf = CharArray(1024)
-                        while (true) {
-                            val n = try {
-                                reader.read(buf)
-                            } catch (io: IOException) {
-                                // Some devices close ADB streams aggressively after command completion.
-                                if (io.message?.contains("Stream closed", ignoreCase = true) == true) {
-                                    break
-                                }
-                                throw io
-                            }
-                            if (n < 0) break
-                            out.append(buf, 0, n)
-                        }
-                    }
-                } finally {
-                    try {
-                        stream.close()
-                    } catch (_: Throwable) {
-                    }
-                }
-                _lastCommandOutput.value = out.toString().ifBlank { "(no output)" }
-            } catch (t: Throwable) {
-                Log.e(TAG, "runCommand failed", t)
-                _lastCommandOutput.value = "Command failed: ${t.message}"
+    suspend fun runCommand(command: String): String = withContext(Dispatchers.IO) {
+        try {
+            if (!adbConnectionManager.isConnected) {
+                return@withContext "Not connected. Pair and connect first."
             }
+            val stream = adbConnectionManager.openStream("shell:$command")
+            val out = StringBuilder()
+            try {
+                stream.openInputStream().bufferedReader().use { reader ->
+                    val buf = CharArray(1024)
+                    while (true) {
+                        val n = try {
+                            reader.read(buf)
+                        } catch (io: IOException) {
+                            // Some devices close ADB streams aggressively after command completion.
+                            if (io.message?.contains("Stream closed", ignoreCase = true) == true) {
+                                break
+                            }
+                            throw io
+                        }
+                        if (n < 0) break
+                        out.append(buf, 0, n)
+                    }
+                }
+            } finally {
+                try {
+                    stream.close()
+                } catch (_: Throwable) {
+                }
+            }
+            out.toString().ifBlank { "(no output)" }
+        } catch (t: Throwable) {
+            Log.e(TAG, "runCommand failed", t)
+            "Command failed: ${t.message}"
         }
     }
 

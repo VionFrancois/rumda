@@ -8,8 +8,9 @@
     <string name="adb_btn_pair">3) Start pairing service</string>
     <string name="adb_btn_connect">4) Auto-connect</string>
     <string name="adb_btn_run_date">5) Run \"date\"</string>
-    <string name="adb_btn_start_loop">6) Start 10s background loop</string>
-    <string name="adb_btn_stop_loop">7) Stop background loop</string>
+    <string name="adb_btn_collect_apk">6) Run APK collector</string>
+    <string name="adb_btn_start_loop">7) Start 10s background loop</string>
+    <string name="adb_btn_stop_loop">8) Stop background loop</string>
     <string name="adb_state_template">ADB state: %1$s</string>
     <string name="adb_output_placeholder">Command output will appear here.</string>
     <string name="notification_channel_adb_loop">ADB Background Loop</string>
