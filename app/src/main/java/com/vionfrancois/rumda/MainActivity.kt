@@ -94,8 +94,10 @@ class MainActivity : AppCompatActivity() {
             text = getString(R.string.adb_btn_collect_apk)
             setOnClickListener {
                 lifecycleScope.launch {
-                    val collector = APKCollector(adbManager)
-                    outputText.text = collector.collect()
+                    val apkCollector = APKCollector(adbManager, applicationContext)
+                    val result = apkCollector.collect()
+                    apkCollector.saveState()
+                    outputText.text = result
                 }
             }
         }
