@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -137,6 +138,97 @@ class AdbManager(private val appContext: Context) {
         } catch (t: Throwable) {
             Log.e(TAG, "runCommand failed", t)
             "Command failed: ${t.message}"
+        }
+    }
+
+    suspend fun pullFile(remotePath: String, destination: File): File = withContext(Dispatchers.IO) {
+        try {
+            if (!adbConnectionManager.isConnected) {
+                throw IOException("Not connected. Pair and connect first.")
+            }
+            destination.parentFile?.mkdirs()
+            val stream = adbConnectionManager.openStream("sync:")
+            try {
+                val input = stream.openInputStream()
+                val output = stream.openOutputStream()
+
+                val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
+                // Start an ADB sync "receive file" request for the remote path.
+                output.write("RECV".toByteArray(Charsets.US_ASCII))
+                writeInt(pathBytes.size, output)
+                output.write(pathBytes)
+                output.flush()
+
+                destination.outputStream().buffered().use { fileOutput ->
+                    val idBuffer = ByteArray(4)
+                    val lengthBuffer = ByteArray(4)
+                    val chunkBuffer = ByteArray(DEFAULT_BUFFER_SIZE)
+
+                    while (true) {
+                        readFully(input, idBuffer, 4)
+                        readFully(input, lengthBuffer, 4)
+
+                        // Each sync packet is 4-byte command id + 4-byte little-endian length.
+                        val id = String(idBuffer, Charsets.US_ASCII)
+                        val length = (lengthBuffer[0].toInt() and 0xff) or
+                            ((lengthBuffer[1].toInt() and 0xff) shl 8) or
+                            ((lengthBuffer[2].toInt() and 0xff) shl 16) or
+                            ((lengthBuffer[3].toInt() and 0xff) shl 24)
+
+                        when (id) {
+                            "DATA" -> {
+                                // DATA packets contain the next chunk of the remote file.
+                                var remaining = length
+                                while (remaining > 0) {
+                                    val count = input.read(chunkBuffer, 0, minOf(chunkBuffer.size, remaining))
+                                    if (count < 0) {
+                                        throw IOException("Unexpected end of ADB sync file payload.")
+                                    }
+                                    fileOutput.write(chunkBuffer, 0, count)
+                                    remaining -= count
+                                }
+                            }
+                            "DONE" -> break
+                            "FAIL" -> {
+                                // FAIL packets return a human-readable error message from adbd.
+                                val messageBuffer = ByteArray(length)
+                                readFully(input, messageBuffer, length)
+                                val message = String(messageBuffer, Charsets.UTF_8)
+                                throw IOException("ADB sync failed: $message")
+                            }
+                            else -> throw IOException("Unexpected ADB sync response: $id")
+                        }
+                    }
+                    fileOutput.flush()
+                }
+            } finally {
+                try {
+                    stream.close()
+                } catch (_: Throwable) {
+                }
+            }
+            destination
+        } catch (t: Throwable) {
+            Log.e(TAG, "pullFile failed", t)
+            throw IOException("Sync pull failed: ${t.message}", t)
+        }
+    }
+
+    private fun writeInt(value: Int, output: io.github.muntashirakon.adb.AdbOutputStream) {
+        output.write(value and 0xff)
+        output.write((value ushr 8) and 0xff)
+        output.write((value ushr 16) and 0xff)
+        output.write((value ushr 24) and 0xff)
+    }
+
+    private fun readFully(input: io.github.muntashirakon.adb.AdbInputStream, buffer: ByteArray, length: Int) {
+        var bytesRead = 0
+        while (bytesRead < length) {
+            val n = input.read(buffer, bytesRead, length - bytesRead)
+            if (n < 0) {
+                throw IOException("Unexpected end of ADB sync stream.")
+            }
+            bytesRead += n
         }
     }
 

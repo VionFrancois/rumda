@@ -2,9 +2,11 @@ package com.vionfrancois.rumda.collectors
 
 import android.content.Context
 import android.util.Log
+import com.vionfrancois.rumda.MainActivity
 import com.vionfrancois.rumda.cadb.AdbManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.security.MessageDigest
 
 class APKCollector(
@@ -12,8 +14,10 @@ class APKCollector(
     context: Context
 ) : StateCollector {
 
-    private val prefs = context.getSharedPreferences("apk_collector_state", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("apk_collector_state", Context.MODE_PRIVATE)
     private var lastCollectedRaw: String? = null
+    private var lastPulledApk: File? = null
 
     private companion object {
         const val TAG = "APKCollector"
@@ -28,6 +32,17 @@ class APKCollector(
         val output = adbManager.runCommand("pm list packages -f")
         lastCollectedRaw = output
         Log.d(TAG, output)
+
+        val apkPath = "/product/app/GoogleContacts/GoogleContacts.apk"
+        val localFile = File(appContext.cacheDir,"GoogleContacts.apk")
+
+        Log.d(TAG, "Trying adb sync pull")
+        adbManager.pullFile(remotePath = apkPath, destination = localFile)
+        lastPulledApk = localFile
+        Log.d(TAG, "Pulled sample APK to ${localFile.absolutePath}")
+
+        Log.d(TAG, sha256File(localFile))
+
         return output
     }
 
@@ -50,7 +65,62 @@ class APKCollector(
 
 
     override fun pushToRemote(content: String) {
-        TODO("Not yet implemented")
+        // TODO : Implement diff check
+        // TODO : Implement loop
+        val hashUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/hash")
+        val hashConnection = (hashUrl.openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+        }
+
+        val hash = "9a607850b33ca84a9296d280bcf10e02541d269e3723c003baba8d279b0abe15"
+
+        val hashBody = JSONObject()
+            .put("hash", hash)
+            .toString()
+
+        hashConnection.outputStream.bufferedWriter().use { it.write(hashBody) }
+
+        val responseCode = hashConnection.responseCode
+
+        // If the hash is not found on the API
+        if(responseCode == 502){
+            // Upload the apk
+            val apkFile = lastPulledApk ?: File(appContext.cacheDir, "sample.apk")
+            if (!apkFile.exists()) {
+                throw IllegalStateException("No APK has been pulled locally yet.")
+            }
+            val boundary = "Boundary-${System.currentTimeMillis()}"
+            val fileUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/file")
+            val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+
+            fileConnection.outputStream.use { output ->
+                output.write("--$boundary\r\n".toByteArray())
+                output.write(
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"${apkFile.name}\"\r\n"
+                        .toByteArray()
+                )
+                output.write("Content-Type: application/vnd.android.package-archive\r\n\r\n".toByteArray())
+                apkFile.inputStream().use { input -> input.copyTo(output) }
+                output.write("\r\n--$boundary--\r\n".toByteArray())
+            }
+
+            val fileResponse = fileConnection.inputStream.bufferedReader().use { it.readText() }
+            Log.d(TAG, "File endpoint response: $fileResponse")
+            fileConnection.disconnect()
+        }
+        else{
+            val hashResponse = hashConnection.inputStream.bufferedReader().use { it.readText() }
+
+            Log.d(TAG, "Hash endpoint response: $hashResponse")
+
+            hashConnection.disconnect()
+        }
     }
 
     fun fetchLastApkList(): List<PackageEntry> {
@@ -106,6 +176,18 @@ class APKCollector(
     private fun sha256(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
         return digest.joinToString(separator = "") { "%02x".format(it) }
+    }
+
+    private fun sha256File(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { fis ->
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            while (fis.read(buffer).also { bytesRead = it } != -1) {
+                digest.update(buffer, 0, bytesRead)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
 }

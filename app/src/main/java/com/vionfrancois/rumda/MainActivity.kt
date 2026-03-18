@@ -21,6 +21,10 @@ import com.vionfrancois.rumda.collectors.APKCollector
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        const val SERVER_BASE_URL = "http://127.0.0.1:8000"
+    }
+
     private lateinit var adbManager: AdbManager
     private lateinit var introText: TextView
     private lateinit var statusText: TextView
