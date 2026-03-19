@@ -8,6 +8,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class APKCollector(
     private val adbManager: AdbManager,
@@ -25,38 +27,48 @@ class APKCollector(
 
     data class PackageEntry(
         val packageName: String,
-        val apkPath: String
+        val apkPath: String,
+        val lastUpdateDate: String,
+        val givenPermisions: List<String>, // TODO : Make the permissions an enumeration ?,
+        val lastVerdict: String?
     )
 
     override suspend fun collect(): String {
+        // Collect package list
         val output = adbManager.runCommand("pm list packages -f")
         lastCollectedRaw = output
         Log.d(TAG, output)
+        val packageList = parsePackageList(output)
 
-        val apkPath = "/product/app/GoogleContacts/GoogleContacts.apk"
-        val localFile = File(appContext.cacheDir,"GoogleContacts.apk")
+        val apkCollection = mutableListOf<PackageEntry>()
 
-        Log.d(TAG, "Trying adb sync pull")
-        adbManager.pullFile(remotePath = apkPath, destination = localFile)
-        lastPulledApk = localFile
-        Log.d(TAG, "Pulled sample APK to ${localFile.absolutePath}")
+        for (pkg in packageList){
+            // Search the lastInstallationDate
+            val output = adbManager.runCommand("dumpsys package ${pkg[0]}")
+            val lastUpdateDate = parseLastUpdateTime(output)
 
-        Log.d(TAG, sha256File(localFile))
+            val grantedPermissions = parseGrantedPermissions(output)
 
-        return output
+            val packageEntry = PackageEntry(pkg[0], pkg[1], lastUpdateDate, grantedPermissions, null)
+            apkCollection.add(packageEntry)
+        }
+        // Create JSON of the state
+        val state = serializePackageList(apkCollection)
+
+        return state
     }
 
 
     override fun saveState() {
-        val raw = lastCollectedRaw ?: return
-        val parsed = parsePackageList(raw) // TODO : Need to sort ?
-        val json = serializePackageList(parsed)
-        val hash = sha256(json)
-
-        prefs.edit()
-            .putString("last_apk_list", json)
-            .putString("last_hash", hash)
-            .apply()
+//        val raw = lastCollectedRaw ?: return
+//        val parsed = parsePackageList(raw) // TODO : Need to sort ?
+//        val json = serializePackageList(parsed)
+//        val hash = sha256(json)
+//
+//        prefs.edit()
+//            .putString("last_apk_list", json)
+//            .putString("last_hash", hash)
+//            .apply()
     }
 
     override fun fetchLastState(): String? {
@@ -67,6 +79,15 @@ class APKCollector(
     override fun pushToRemote(content: String) {
         // TODO : Implement diff check
         // TODO : Implement loop
+        //        val apkPath = "/product/app/GoogleContacts/GoogleContacts.apk"
+//        val localFile = File(appContext.cacheDir,"GoogleContacts.apk")
+//
+//        Log.d(TAG, "Trying adb sync pull")
+//        adbManager.pullFile(remotePath = apkPath, destination = localFile)
+//        lastPulledApk = localFile
+//        Log.d(TAG, "Pulled sample APK to ${localFile.absolutePath}")
+//
+//        Log.d(TAG, sha256File(localFile))
         val hashUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/hash")
         val hashConnection = (hashUrl.openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "POST"
@@ -128,23 +149,29 @@ class APKCollector(
         return deserializePackageList(json)
     }
 
-    fun parsePackageList(raw: String): List<PackageEntry> {
-        return raw.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("package:") && it.contains("=") }
-            .mapNotNull { line ->
-                val body = line.removePrefix("package:")
-                val parts = body.split("=", limit = 2)
-                if (parts.size != 2) {
-                    null
-                } else {
-                    PackageEntry(
-                        apkPath = parts[0],
-                        packageName = parts[1]
-                    )
-                }
+
+    fun parsePackageList(input: String): List<List<String>> {
+        return input.lines()
+            .filter { it.startsWith("package:") }
+            .map { line ->
+                val withoutPrefix = line.removePrefix("package:")
+                val (path, name) = withoutPrefix.split("=")
+                listOf(name, path)
             }
-            .toList()
+    }
+
+    fun parseLastUpdateTime(input: String): String {
+        return input.lines()
+            .firstOrNull { it.contains("lastUpdateTime=") }
+            ?.trimStart()
+            ?.removePrefix("lastUpdateTime=")
+            ?: ""
+    }
+
+    fun parseGrantedPermissions(input: String): List<String> {
+        return input.lines()
+            .filter { it.contains("granted=true") }
+            .map { it.trimStart().substringBefore(":") }
     }
 
     private fun serializePackageList(list: List<PackageEntry>): String {
@@ -154,6 +181,9 @@ class APKCollector(
                 JSONObject()
                     .put("packageName", item.packageName)
                     .put("apkPath", item.apkPath)
+                    .put("lastUpdateDate", item.lastUpdateDate)
+                    .put("givenPermissions", item.givenPermisions)
+                    .put("lastVerdict", item.lastVerdict)
             )
         }
         return jsonArray.toString()
@@ -166,8 +196,20 @@ class APKCollector(
             val obj = array.optJSONObject(i) ?: continue
             val packageName = obj.optString("packageName")
             val apkPath = obj.optString("apkPath")
+            val lastUpdateDate = obj.optString("lastUpdateDate")
+
+            val givenPermissions = mutableListOf<String>()
+            val permissionsArray = obj.optJSONArray("givenPermissions")
+            if (permissionsArray != null) {
+                for (j in 0 until permissionsArray.length()) {
+                    givenPermissions.add(permissionsArray.getString(j))
+                }
+            }
+
+            val lastVerdict = obj.optString("lastVerdict").takeIf { it != "null" }
+
             if (packageName.isNotBlank() && apkPath.isNotBlank()) {
-                result.add(PackageEntry(packageName = packageName, apkPath = apkPath))
+                result.add(PackageEntry(packageName, apkPath, lastUpdateDate, givenPermissions, lastVerdict))
             }
         }
         return result
