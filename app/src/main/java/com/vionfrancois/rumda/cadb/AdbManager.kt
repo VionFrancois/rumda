@@ -14,16 +14,25 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "AdbManager"
+private const val RUN_COMMAND_TIMEOUT_MS = 10_000L
 
 class AdbManager(private val appContext: Context) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val commandExecutor: ExecutorService = Executors.newCachedThreadPool()
     private val _adbState = MutableStateFlow<AdbState>(AdbState.Initial)
     val adbState: StateFlow<AdbState> = _adbState.asStateFlow()
 
     private val adbConnectionManager: AdbConnectionManager =
         AdbConnectionManager.getInstance(appContext) as AdbConnectionManager
+
+    init {
+        adbConnectionManager.setTimeout(10, TimeUnit.SECONDS)
+    }
 
     private val adbPairingReceiver =
         AdbPairingResultReceiver(
@@ -109,32 +118,53 @@ class AdbManager(private val appContext: Context) {
             if (!adbConnectionManager.isConnected) {
                 return@withContext "Not connected. Pair and connect first."
             }
-            val stream = adbConnectionManager.openStream("shell:$command")
-            val out = StringBuilder()
-            try {
-                stream.openInputStream().bufferedReader().use { reader ->
-                    val buf = CharArray(1024)
-                    while (true) {
-                        val n = try {
-                            reader.read(buf)
-                        } catch (io: IOException) {
-                            // Some devices close ADB streams aggressively after command completion.
-                            if (io.message?.contains("Stream closed", ignoreCase = true) == true) {
-                                break
-                            }
-                            throw io
-                        }
-                        if (n < 0) break
-                        out.append(buf, 0, n)
-                    }
-                }
-            } finally {
+            val streamRef = AtomicReference<io.github.muntashirakon.adb.AdbStream?>()
+            val future = commandExecutor.submit<String> {
+                val stream = adbConnectionManager.openStream("shell:$command")
+                streamRef.set(stream)
+                val out = StringBuilder()
                 try {
-                    stream.close()
+                    stream.openInputStream().bufferedReader().use { reader ->
+                        val buf = CharArray(1024)
+                        while (true) {
+                            val n = try {
+                                reader.read(buf)
+                            } catch (io: IOException) {
+                                // Some devices close ADB streams aggressively after command completion.
+                                if (io.message?.contains("Stream closed", ignoreCase = true) == true) {
+                                    break
+                                }
+                                throw io
+                            }
+                            if (n < 0) break
+                            out.append(buf, 0, n)
+                        }
+                    }
+                } finally {
+                    try {
+                        stream.close()
+                    } catch (_: Throwable) {
+                    }
+                    streamRef.set(null)
+                }
+                out.toString().ifBlank { "(no output)" }
+            }
+
+            try {
+                future.get(RUN_COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            } catch (_: TimeoutException) {
+                Log.e(TAG, "runCommand timed out for `$command`")
+                try {
+                    streamRef.get()?.close()
                 } catch (_: Throwable) {
                 }
+                try {
+                    adbConnectionManager.disconnect()
+                } catch (_: Throwable) {
+                }
+                future.cancel(true)
+                "Command failed: timeout"
             }
-            out.toString().ifBlank { "(no output)" }
         } catch (t: Throwable) {
             Log.e(TAG, "runCommand failed", t)
             "Command failed: ${t.message}"
@@ -235,5 +265,6 @@ class AdbManager(private val appContext: Context) {
     fun cleanup() {
         stopAdbPairingService()
         executor.shutdown()
+        commandExecutor.shutdownNow()
     }
 }

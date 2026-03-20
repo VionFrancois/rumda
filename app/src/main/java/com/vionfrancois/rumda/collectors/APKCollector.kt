@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.vionfrancois.rumda.MainActivity
 import com.vionfrancois.rumda.cadb.AdbManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -35,13 +37,14 @@ class APKCollector(
     )
 
     override suspend fun collect(): List<PackageEntry> {
-        val output = adbManager.runCommand("pm list packages -f")
-        lastCollectedRaw = output
-        val packageList = parsePackageList(output)
+        val packageListOutput = adbManager.runCommand("pm list packages -f")
+        lastCollectedRaw = packageListOutput
+        val packageList = parsePackageList(packageListOutput)
+        Log.d(TAG, "Found ${packageList.size} packages")
+
 
         val apkCollection = mutableListOf<PackageEntry>()
 
-        Log.d(TAG, "Taille de liste ${packageList.size}")
         var i = 0
         for (pkg in packageList) {
             val packageOutput = adbManager.runCommand("dumpsys package ${pkg[0]}")
@@ -59,7 +62,6 @@ class APKCollector(
             Log.d(TAG, "Created Entry for ${pkg[0]} ${packageList.size - i - 1} remaining")
             i++
         }
-        Log.d(TAG, "Sorti de la boucle de création")
 
         val normalizedEntries = normalizeEntries(apkCollection)
         return normalizedEntries
@@ -103,14 +105,13 @@ class APKCollector(
         }
     }
 
-    suspend fun requestAPKAnalysis(packagePath: String): String{
+    suspend fun requestAPKAnalysis(packagePath: String): String = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Requested APK Analysis for $packagePath")
         val filename = packagePath.substringAfterLast("/")
-        val localFile = File(appContext.cacheDir,filename)
+        val localFile = File(appContext.cacheDir, filename)
 
-        Log.d(TAG, "Trying adb sync pull")
         adbManager.pullFile(remotePath = packagePath, destination = localFile)
         lastPulledApk = localFile
-        Log.d(TAG, "Pulled APK to ${localFile.absolutePath}")
 
         val hashUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/hash")
         val hashConnection = (hashUrl.openConnection() as java.net.HttpURLConnection).apply {
@@ -119,48 +120,69 @@ class APKCollector(
             setRequestProperty("Content-Type", "application/json")
         }
 
-        val sha256Hash = sha256File(localFile)
-        Log.d(TAG, sha256Hash)
+        try {
+            val sha256Hash = sha256File(localFile)
 
-        val hashBody = JSONObject()
-            .put("hash", sha256Hash)
-            .toString()
+            val hashBody = JSONObject()
+                .put("hash", sha256Hash)
+                .toString()
 
-        hashConnection.outputStream.bufferedWriter().use { it.write(hashBody) }
+            hashConnection.outputStream.bufferedWriter().use { it.write(hashBody) }
 
-        val responseCode = hashConnection.responseCode
+            val hashResponseBody = (
+                if (hashConnection.responseCode == 200) {
+                    hashConnection.inputStream
+                } else {
+                    hashConnection.errorStream
+                }
+            )?.bufferedReader()?.use { it.readText() }.orEmpty()
 
-        // If the hash is not found on the API
-        val responseBody = if (responseCode == 502) {
-            val boundary = "Boundary-${System.currentTimeMillis()}"
-            val fileUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/file")
-            val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            Log.d(TAG, "ResponseBody : ${hashResponseBody}")
+
+            val hashFound = runCatching {
+                JSONObject(hashResponseBody).optBoolean("found", false)
+            }.getOrDefault(false)
+
+            // If the hash is not found on the API
+            val responseBody = if (!hashFound) {
+                val boundary = "Boundary-${System.currentTimeMillis()}"
+                val fileUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/file")
+                val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                }
+
+                try {
+                    fileConnection.outputStream.use { output ->
+                        output.write("--$boundary\r\n".toByteArray())
+                        output.write(
+                            "Content-Disposition: form-data; name=\"file\"; filename=\"${localFile.name}\"\r\n".toByteArray()
+                        )
+                        output.write("Content-Type: application/vnd.android.package-archive\r\n\r\n".toByteArray())
+                        localFile.inputStream().use { input -> input.copyTo(output) }
+                        output.write("\r\n--$boundary--\r\n".toByteArray())
+                    }
+
+                    (
+                        if (fileConnection.responseCode == 200) {
+                            fileConnection.inputStream
+                        } else {
+                            fileConnection.errorStream
+                        }
+                    )?.bufferedReader()?.use { it.readText() }.orEmpty()
+                } finally {
+                    fileConnection.disconnect()
+                }
+            } else {
+                hashResponseBody
             }
 
-            fileConnection.outputStream.use { output ->
-                output.write("--$boundary\r\n".toByteArray())
-                output.write(
-                    "Content-Disposition: form-data; name=\"file\"; filename=\"${localFile.name}\"\r\n".toByteArray()
-                )
-                output.write("Content-Type: application/vnd.android.package-archive\r\n\r\n".toByteArray())
-                localFile.inputStream().use { input -> input.copyTo(output) }
-                output.write("\r\n--$boundary--\r\n".toByteArray())
-            }
-
-            fileConnection.inputStream.bufferedReader().use { it.readText() }.also {
-                fileConnection.disconnect()
-            }
-        } else {
-            hashConnection.inputStream.bufferedReader().use { it.readText() }
+            Log.d(TAG, responseBody)
+            responseBody
+        } finally {
+            hashConnection.disconnect()
         }
-
-        hashConnection.disconnect()
-
-        Log.d(TAG, responseBody)
-        return responseBody
     }
 
     fun fetchLastApkList(): List<PackageEntry> {
@@ -171,9 +193,15 @@ class APKCollector(
     fun parsePackageList(input: String): List<List<String>> {
         return input.lines()
             .filter { it.startsWith("package:") }
-            .map { line ->
+            .mapNotNull { line ->
                 val withoutPrefix = line.removePrefix("package:")
-                val (path, name) = withoutPrefix.split("=")
+                val separatorIndex = withoutPrefix.lastIndexOf('=')
+                if (separatorIndex <= 0 || separatorIndex == withoutPrefix.lastIndex) {
+                    Log.w(TAG, "parsePackageList(): unable to parse line `$line`")
+                    return@mapNotNull null
+                }
+                val path = withoutPrefix.substring(0, separatorIndex)
+                val name = withoutPrefix.substring(separatorIndex + 1)
                 listOf(name, path)
             }
     }

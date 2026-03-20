@@ -17,12 +17,15 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.vionfrancois.rumda.cadb.AdbCommandService
 import com.vionfrancois.rumda.cadb.AdbManager
+import com.vionfrancois.rumda.cadb.AdbState
 import com.vionfrancois.rumda.collectors.APKCollector
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : AppCompatActivity() {
     companion object {
-        const val SERVER_BASE_URL = "http://127.0.0.1:8000"
+        const val SERVER_BASE_URL = "http://10.0.2.2:8000"
     }
 
     private lateinit var adbManager: AdbManager
@@ -100,8 +103,8 @@ class MainActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     val apkCollector = APKCollector(adbManager, applicationContext)
                     val result = apkCollector.collect()
-                    apkCollector.saveState()
-                    outputText.text = result
+                    val remote = apkCollector.requestAPKAnalysis(result[0].apkPath)
+                    outputText.text = remote
                 }
             }
         }
