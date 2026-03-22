@@ -3,9 +3,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 API_URL = "https://www.virustotal.com/api/v3/files"
-API_KEY_PATH = "./virustotal-api-key"
+API_KEY_PATH = "virustotal-api-key"
 
-with API_KEY_PATH.open() as f:
+with open(API_KEY_PATH) as f:
     API_KEY = f.read().strip()
 
 
