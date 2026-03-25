@@ -262,6 +262,17 @@ class AdbManager(private val appContext: Context) {
         }
     }
 
+    fun handleWirelessDebuggingDisabled() {
+        try {
+            adbConnectionManager.disconnect()
+        } catch (_: Throwable) {
+        }
+
+        if (_adbState.value != AdbState.Ready) {
+            _adbState.value = AdbState.Ready
+        }
+    }
+
     fun cleanup() {
         stopAdbPairingService()
         executor.shutdown()

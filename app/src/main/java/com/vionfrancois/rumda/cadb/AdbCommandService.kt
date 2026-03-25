@@ -32,7 +32,7 @@ class AdbCommandService : Service() {
         fun startLoopIntent(
             context: Context,
             command: String = "date",
-            intervalMs: Long = 10_000L
+            intervalMs: Long = 60_000L
         ): Intent {
             return Intent(context, AdbCommandService::class.java)
                 .setAction(ACTION_START_LOOP)
@@ -48,7 +48,7 @@ class AdbCommandService : Service() {
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private var loopFuture: ScheduledFuture<*>? = null
     private var currentCommand: String = "date"
-    private var currentIntervalMs: Long = 10_000L
+    private var currentIntervalMs: Long = 60_000L
     private lateinit var adbConnectionManager: AdbConnectionManager
 
     override fun onCreate() {
@@ -61,7 +61,7 @@ class AdbCommandService : Service() {
         when (intent?.action) {
             ACTION_START_LOOP -> {
                 currentCommand = intent.getStringExtra(EXTRA_COMMAND)?.ifBlank { "date" } ?: "date"
-                currentIntervalMs = intent.getLongExtra(EXTRA_INTERVAL_MS, 10_000L).coerceAtLeast(1_000L)
+                currentIntervalMs = intent.getLongExtra(EXTRA_INTERVAL_MS, 60_000L).coerceAtLeast(1_000L)
                 startAsForeground("Starting loop: $currentCommand every ${currentIntervalMs / 1000}s")
                 startLoop()
             }
@@ -79,7 +79,7 @@ class AdbCommandService : Service() {
 
     private fun startLoop() {
         stopLoop()
-        loopFuture = scheduler.scheduleAtFixedRate(
+        loopFuture = scheduler.scheduleWithFixedDelay(
             { runLoopTick() },
             0,
             currentIntervalMs,
