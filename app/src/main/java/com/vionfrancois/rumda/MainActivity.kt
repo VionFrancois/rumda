@@ -15,6 +15,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.vionfrancois.rumda.cadb.AdbCommandService
 import com.vionfrancois.rumda.cadb.AdbManager
 import com.vionfrancois.rumda.cadb.AdbState
 import kotlinx.coroutines.launch
@@ -24,7 +25,11 @@ class MainActivity : AppCompatActivity() {
         const val SERVER_BASE_URL = "http://10.0.2.2:8000"
         private const val PREFS_NAME = "rumda_prefs"
         private const val PREF_ONBOARDING_COMPLETED = "onboarding_completed"
+        private const val PREF_MONITORING_CATEGORIES = "monitoring_categories"
         private const val WIRELESS_DEBUGGING_KEY = "adb_wifi_enabled"
+        private const val CATEGORY_APKS = "APKS"
+        private const val CATEGORY_IPS = "IPS"
+        private const val CATEGORY_SERVICES = "SERVICES"
     }
 
     private lateinit var prefs: SharedPreferences
@@ -38,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var servicesCheckBox: CheckBox
     private var wirelessDebuggingDialogVisible = false
     private var notificationsDialogVisible = false
+    private var backgroundLoopStarted = false
 
     private val notificationsPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -64,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
                 adbManager.adbState.collect {
+                    handleBackgroundServiceState()
                     refreshUi(triggerAutoActions = false)
                 }
             }
@@ -96,6 +103,8 @@ class MainActivity : AppCompatActivity() {
         apkCheckBox = findViewById(R.id.apkCheckBox)
         ipsCheckBox = findViewById(R.id.ipsCheckBox)
         servicesCheckBox = findViewById(R.id.servicesCheckBox)
+        restoreMonitoringSelections()
+        bindMonitoringPreferenceListeners()
     }
 
     private fun refreshUi(triggerAutoActions: Boolean) {
@@ -276,5 +285,56 @@ class MainActivity : AppCompatActivity() {
             putExtra(":settings:fragment_args_key", "toggle_adb_wireless")
         }
         startActivity(intent)
+    }
+
+    private fun restoreMonitoringSelections() {
+        val selectedCategories = prefs.getStringSet(PREF_MONITORING_CATEGORIES, emptySet()).orEmpty()
+        apkCheckBox.isChecked = CATEGORY_APKS in selectedCategories
+        ipsCheckBox.isChecked = CATEGORY_IPS in selectedCategories
+        servicesCheckBox.isChecked = CATEGORY_SERVICES in selectedCategories
+    }
+
+    private fun bindMonitoringPreferenceListeners() {
+        apkCheckBox.setOnCheckedChangeListener { _, _ -> saveMonitoringSelections() }
+        ipsCheckBox.setOnCheckedChangeListener { _, _ -> saveMonitoringSelections() }
+        servicesCheckBox.setOnCheckedChangeListener { _, _ -> saveMonitoringSelections() }
+    }
+
+    private fun saveMonitoringSelections() {
+        val selectedCategories = buildSet {
+            if (apkCheckBox.isChecked) add(CATEGORY_APKS)
+            if (ipsCheckBox.isChecked) add(CATEGORY_IPS)
+            if (servicesCheckBox.isChecked) add(CATEGORY_SERVICES)
+        }
+
+        prefs.edit()
+            .putStringSet(PREF_MONITORING_CATEGORIES, selectedCategories)
+            .apply()
+    }
+
+    private fun ensureBackgroundServiceStarted() {
+        if (backgroundLoopStarted) return
+
+        val serviceIntent = AdbCommandService.startLoopIntent(applicationContext)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                applicationContext.startForegroundService(serviceIntent)
+            } else {
+                applicationContext.startService(serviceIntent)
+            }
+            backgroundLoopStarted = true
+        } catch (_: Throwable) {
+            applicationContext.startService(serviceIntent)
+            backgroundLoopStarted = true
+        }
+    }
+
+    private fun handleBackgroundServiceState() {
+        val connected = isWirelessDebuggingEnabled() && adbManager.adbState.value in AdbState.successStates()
+        if (connected) {
+            ensureBackgroundServiceStarted()
+        } else {
+            backgroundLoopStarted = false
+        }
     }
 }

@@ -11,10 +11,17 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.vionfrancois.rumda.R
+import com.vionfrancois.rumda.collectors.APKCollector
+import com.vionfrancois.rumda.collectors.StateCollector
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.IOException
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 
 private const val TAG = "AdbCommandService"
 
@@ -23,7 +30,6 @@ class AdbCommandService : Service() {
     companion object {
         const val ACTION_START_LOOP = "com.vionfrancois.rumda.action.START_LOOP"
         const val ACTION_STOP_LOOP = "com.vionfrancois.rumda.action.STOP_LOOP"
-        const val EXTRA_COMMAND = "command"
         const val EXTRA_INTERVAL_MS = "interval_ms"
 
         private const val CHANNEL_ID = "adb_command_loop"
@@ -31,12 +37,10 @@ class AdbCommandService : Service() {
 
         fun startLoopIntent(
             context: Context,
-            command: String = "date",
             intervalMs: Long = 60_000L
         ): Intent {
             return Intent(context, AdbCommandService::class.java)
                 .setAction(ACTION_START_LOOP)
-                .putExtra(EXTRA_COMMAND, command)
                 .putExtra(EXTRA_INTERVAL_MS, intervalMs)
         }
 
@@ -45,24 +49,24 @@ class AdbCommandService : Service() {
         }
     }
 
-    private val scheduler = Executors.newSingleThreadScheduledExecutor()
-    private var loopFuture: ScheduledFuture<*>? = null
-    private var currentCommand: String = "date"
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var loopJob: Job? = null
     private var currentIntervalMs: Long = 60_000L
     private lateinit var adbConnectionManager: AdbConnectionManager
+    private lateinit var adbManager: AdbManager
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         adbConnectionManager = AdbConnectionManager.getInstance(applicationContext) as AdbConnectionManager
+        adbManager = AdbManager(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_LOOP -> {
-                currentCommand = intent.getStringExtra(EXTRA_COMMAND)?.ifBlank { "date" } ?: "date"
                 currentIntervalMs = intent.getLongExtra(EXTRA_INTERVAL_MS, 60_000L).coerceAtLeast(1_000L)
-                startAsForeground("Starting loop: $currentCommand every ${currentIntervalMs / 1000}s")
+                startAsForeground("Monitoring the device")
                 startLoop()
             }
             ACTION_STOP_LOOP -> {
@@ -71,7 +75,7 @@ class AdbCommandService : Service() {
                 stopSelf()
             }
             else -> {
-                startAsForeground("ADB loop idle")
+                startAsForeground("Not monitoring the device")
             }
         }
         return START_STICKY
@@ -79,25 +83,60 @@ class AdbCommandService : Service() {
 
     private fun startLoop() {
         stopLoop()
-        loopFuture = scheduler.scheduleWithFixedDelay(
-            { runLoopTick() },
-            0,
-            currentIntervalMs,
-            TimeUnit.MILLISECONDS
-        )
+        loopJob = serviceScope.launch {
+            while (isActive) {
+                runLoopTick()
+                delay(currentIntervalMs)
+            }
+        }
     }
 
     private fun stopLoop() {
-        loopFuture?.cancel(true)
-        loopFuture = null
+        loopJob?.cancel()
+        loopJob = null
     }
 
-    private fun runLoopTick() {
+    private suspend fun runLoopTick() {
         try {
             ensureConnected()
-            val output = runCommandOnce(currentCommand).ifBlank { "(no output)" }
-            Log.println(Log.INFO, "AdbCommandService:runLoopTick",output)
-            updateNotification("Last: ${output.take(100)}")
+            val prefs = getSharedPreferences("rumda_prefs", Context.MODE_PRIVATE)
+            val categories = prefs.getStringSet("monitoring_categories", emptySet())?.toSet().orEmpty()
+            val collectors = mutableListOf<StateCollector>()
+            val collectorNames = mutableListOf<String>()
+
+            for (category in categories) {
+                when (category) {
+                    "APKS" -> {
+                        collectors.add(APKCollector(adbManager, applicationContext))
+                        collectorNames.add("APKS")
+                    }
+//                    "IPS" -> {
+//                        collectors.add(IPSCollector(adbManager, applicationContext))
+//                        collectorNames.add("IPS")
+//                    }
+//                    "SERVICES" -> {
+//                        collectors.add(ServicesCollector(adbManager, applicationContext))
+//                        collectorNames.add("SERVICES")
+//                    }
+                }
+            }
+
+//            Objective
+//            for(collector in collectors){
+//                val lastState = collector.fetchLastState()
+//                val state = collector.collect()
+//                if (lastState != state){
+//                    val response = collector.pushToRemote()
+//                    collector.saveState(state, response)
+//                }
+//            }
+            
+            val monitoringText = if (collectorNames.isEmpty()) {
+                "Not monitoring"
+            } else {
+                "Monitoring: ${collectorNames.joinToString(", ")}"
+            }
+            updateNotification(monitoringText)
         } catch (e: Throwable) {
             Log.e(TAG, "Loop tick failed", e)
             val msg = e.message ?: e.javaClass.simpleName
@@ -109,32 +148,6 @@ class AdbCommandService : Service() {
         if (adbConnectionManager.isConnected) return
         val connected = adbConnectionManager.connectTls(applicationContext, 5000)
         if (!connected) throw IOException("Unable to connect to ADB over TLS")
-    }
-
-    private fun runCommandOnce(command: String): String {
-        val stream = adbConnectionManager.openStream("shell:$command")
-        val out = StringBuilder()
-        try {
-            stream.openInputStream().bufferedReader().use { reader ->
-                val buf = CharArray(1024)
-                while (true) {
-                    val n = try {
-                        reader.read(buf)
-                    } catch (io: IOException) {
-                        if (io.message?.contains("Stream closed", ignoreCase = true) == true) break
-                        throw io
-                    }
-                    if (n < 0) break
-                    out.append(buf, 0, n)
-                }
-            }
-        } finally {
-            try {
-                stream.close()
-            } catch (_: Throwable) {
-            }
-        }
-        return out.toString().trim()
     }
 
     private fun createNotificationChannel() {
@@ -182,7 +195,8 @@ class AdbCommandService : Service() {
 
     override fun onDestroy() {
         stopLoop()
-        scheduler.shutdownNow()
+        serviceScope.cancel()
+        adbManager.cleanup()
         super.onDestroy()
     }
 
