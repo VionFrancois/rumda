@@ -99,6 +99,7 @@ class AdbCommandService : Service() {
     private suspend fun runLoopTick() {
         try {
             ensureConnected()
+            Log.d(TAG, "Loop entry")
             val prefs = getSharedPreferences("rumda_prefs", Context.MODE_PRIVATE)
             val categories = prefs.getStringSet("monitoring_categories", emptySet())?.toSet().orEmpty()
             val collectors = mutableListOf<StateCollector>()
@@ -121,15 +122,9 @@ class AdbCommandService : Service() {
                 }
             }
 
-//            Objective
-//            for(collector in collectors){
-//                val lastState = collector.fetchLastState()
-//                val state = collector.collect()
-//                if (lastState != state){
-//                    val response = collector.pushToRemote()
-//                    collector.saveState(state, response)
-//                }
-//            }
+            for (collector in collectors){
+                collector.run()
+            }
             
             val monitoringText = if (collectorNames.isEmpty()) {
                 "Not monitoring"

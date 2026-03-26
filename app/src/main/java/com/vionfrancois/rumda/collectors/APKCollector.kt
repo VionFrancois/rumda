@@ -14,7 +14,7 @@ import java.security.MessageDigest
 class APKCollector(
     private val adbManager: AdbManager,
     context: Context
-) : StateCollector {
+) : StateCollector() {
 
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("apk_collector_state", Context.MODE_PRIVATE)
@@ -25,7 +25,6 @@ class APKCollector(
     private companion object {
         const val TAG = "APKCollector"
         const val PREF_LAST_APK_LIST = "last_apk_list"
-        const val PREF_LAST_SNAPSHOT_HASH = "last_snapshot_hash"
     }
 
     data class PackageEntry(
@@ -33,10 +32,47 @@ class APKCollector(
         val apkPath: String,
         val lastUpdateDate: String,
         val givenPermisions: List<String>, // TODO : Make the permissions an enumeration ?,
-        var lastVerdict: String?
-    )
+        var lastAnalysis: APKAnalysis?
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is PackageEntry) return false
 
-    override suspend fun collect(): List<PackageEntry> {
+            return packageName == other.packageName &&
+                apkPath == other.apkPath &&
+                lastUpdateDate == other.lastUpdateDate &&
+                givenPermisions.sorted() == other.givenPermisions.sorted()
+        }
+    }
+
+    data class APKAnalysis(
+        val found: Boolean,
+        val analysisType: String,
+        val malicious: Boolean,
+        val degree: String,
+        val details: Map<String, Any?>
+    ) {
+        fun toJson(): JSONObject {
+            val detailsJson = JSONObject()
+            for ((key, value) in details) {
+                detailsJson.put(key, value)
+            }
+
+            return JSONObject()
+                .put("found", found)
+                .put("analysisType", analysisType)
+                .put("malicious", malicious)
+                .put("degree", degree)
+                .put("details", detailsJson)
+        }
+    }
+
+    override fun fetchLastState(): List<PackageEntry> {
+        val json = prefs.getString(PREF_LAST_APK_LIST, null) ?: return emptyList()
+        return deserializePackageList(json)
+    }
+
+    override suspend fun collectState(): List<PackageEntry> { // TODO : Also return an hash later ?
         val packageListOutput = adbManager.runCommand("pm list packages -f")
         lastCollectedRaw = packageListOutput
         val packageList = parsePackageList(packageListOutput)
@@ -56,7 +92,7 @@ class APKCollector(
                 apkPath = pkg[1],
                 lastUpdateDate = lastUpdateDate,
                 givenPermisions = grantedPermissions,
-                lastVerdict = null
+                lastAnalysis = null
             )
             apkCollection.add(packageEntry)
             Log.d(TAG, "Created Entry for ${pkg[0]} ${packageList.size - i - 1} remaining")
@@ -67,45 +103,54 @@ class APKCollector(
         return normalizedEntries
     }
 
+    override suspend fun pushDiffToRemote(oldState: List<PackageEntry>, newState: MutableList<PackageEntry>): MutableList<String> {
+        // Find changes
+        val (addedEntries, changedEntries) = diffStates(oldState, newState)
 
-    override fun saveState() {
-        if (lastCollectedEntries.isEmpty()) {
-            return
+        val maliciousVerdict = mutableListOf<String>()
+
+        // Ask analysis for changed APK
+        for (added in addedEntries) {
+            val analysis = requestAPKAnalysis(added.apkPath)
+            val index = newState.indexOf(added)
+            newState[index] = added.copy(lastAnalysis = analysis)
+            if (analysis.malicious) {
+                maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
+            }
         }
 
-        val normalizedEntries = normalizeEntries(lastCollectedEntries)
+        for (modified in changedEntries) {
+            val analysis = requestAPKAnalysis(modified.apkPath)
+            val index = newState.indexOf(modified)
+            newState[index] = modified.copy(lastAnalysis = analysis)
+            if (analysis.malicious) {
+                maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
+            }
+        }
+
+        return maliciousVerdict
+    }
+
+    override suspend fun handleVerdict(response: MutableList<String>) {
+        if (response.isNotEmpty()) {
+            // TODO : Send notification
+            Log.w(TAG, "Malicious packages detected: ${response.joinToString()}")
+        }
+    }
+
+
+    override fun saveState(state: List<PackageEntry>) {
+        lastCollectedEntries = normalizeEntries(state)
+        val normalizedEntries = lastCollectedEntries
         val json = serializePackageList(normalizedEntries)
-        val hash = stateHash(normalizedEntries)
 
         prefs.edit()
             .putString(PREF_LAST_APK_LIST, json)
-            .putString(PREF_LAST_SNAPSHOT_HASH, hash)
             .apply()
     }
 
 
-    suspend fun pushToRemote(newState: MutableList<PackageEntry>) {
-        // Find changes
-        val oldState = fetchLastApkList()
-        val changes = diffStates(oldState, newState)
-
-        // Ask analysis for changed APK
-        for(added in changes[0]){
-            val verdict = requestAPKAnalysis(added.apkPath)
-            // TODO : Trigger notification ?
-            val index = newState.indexOf(added)
-            newState[index] = added.copy(lastVerdict = verdict)
-        }
-
-        for(modified in changes[1]){
-            val verdict = requestAPKAnalysis(modified.apkPath)
-            // TODO : Trigger notification ?
-            val index = newState.indexOf(modified)
-            newState[index] = modified.copy(lastVerdict = verdict)
-        }
-    }
-
-    suspend fun requestAPKAnalysis(packagePath: String): String = withContext(Dispatchers.IO) {
+    suspend fun requestAPKAnalysis(packagePath: String): APKAnalysis = withContext(Dispatchers.IO) {
         Log.d(TAG, "Requested APK Analysis for $packagePath")
         val filename = packagePath.substringAfterLast("/")
         val localFile = File(appContext.cacheDir, filename)
@@ -179,18 +224,33 @@ class APKCollector(
             }
 
             Log.d(TAG, responseBody)
-            responseBody
+            parseAPKAnalysis(responseBody)
         } finally {
             hashConnection.disconnect()
         }
     }
 
-    fun fetchLastApkList(): List<PackageEntry> {
-        val json = prefs.getString(PREF_LAST_APK_LIST, null) ?: return emptyList()
-        return deserializePackageList(json)
+    private fun parseAPKAnalysis(responseBody: String): APKAnalysis {
+        val responseJson = JSONObject(responseBody)
+        val detailsJson = responseJson.optJSONObject("details") ?: JSONObject()
+        val details = buildMap<String, Any?> {
+            val keys = detailsJson.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                put(key, detailsJson.opt(key))
+            }
+        }
+
+        return APKAnalysis(
+            found = responseJson.optBoolean("found", false),
+            analysisType = responseJson.optString("analysis_type"),
+            malicious = responseJson.optBoolean("malicious", false),
+            degree = responseJson.optString("degree"),
+            details = details
+        )
     }
 
-    fun parsePackageList(input: String): List<List<String>> {
+    private fun parsePackageList(input: String): List<List<String>> {
         return input.lines()
             .filter { it.startsWith("package:") }
             .mapNotNull { line ->
@@ -206,7 +266,7 @@ class APKCollector(
             }
     }
 
-    fun parseLastUpdateTime(input: String): String {
+    private fun parseLastUpdateTime(input: String): String {
         return input.lines()
             .firstOrNull { it.contains("lastUpdateTime=") }
             ?.trimStart()
@@ -214,7 +274,7 @@ class APKCollector(
             ?: ""
     }
 
-    fun parseGrantedPermissions(input: String): List<String> {
+    private fun parseGrantedPermissions(input: String): List<String> {
         return input.lines()
             .filter { it.contains("granted=true") }
             .map { it.trimStart().substringBefore(":") }
@@ -229,7 +289,7 @@ class APKCollector(
                     .put("apkPath", item.apkPath)
                     .put("lastUpdateDate", item.lastUpdateDate)
                     .put("givenPermissions", item.givenPermisions)
-                    .put("lastVerdict", item.lastVerdict)
+                    .put("lastAnalysis", item.lastAnalysis?.toJson())
             )
         }
         return jsonArray.toString()
@@ -252,16 +312,24 @@ class APKCollector(
                 }
             }
 
-            val lastVerdict = obj.optString("lastVerdict").takeIf { it != "null" }
+            val lastAnalysis = obj.optJSONObject("lastAnalysis")?.let { analysisJson ->
+                APKAnalysis(
+                    found = analysisJson.optBoolean("found", false),
+                    analysisType = analysisJson.optString("analysisType"),
+                    malicious = analysisJson.optBoolean("malicious", false),
+                    degree = analysisJson.optString("degree"),
+                    details = analysisJson.optJSONObject("details")?.toMap().orEmpty()
+                )
+            }
 
             if (packageName.isNotBlank() && apkPath.isNotBlank()) {
-                result.add(PackageEntry(packageName, apkPath, lastUpdateDate, givenPermissions, lastVerdict))
+                result.add(PackageEntry(packageName, apkPath, lastUpdateDate, givenPermissions, lastAnalysis))
             }
         }
         return result
     }
 
-    private fun diffStates(oldEntries: List<PackageEntry>, newEntries: List<PackageEntry>): List<List<PackageEntry>> {
+    private fun diffStates(oldEntries: List<PackageEntry>, newEntries: List<PackageEntry>): Pair<List<PackageEntry>, List<PackageEntry>> {
         val oldMap = normalizeEntries(oldEntries).associateBy { it.packageName }
         val newMap = normalizeEntries(newEntries).associateBy { it.packageName }
 
@@ -271,15 +339,12 @@ class APKCollector(
         val added = (newKeys - oldKeys)
             .mapNotNull(newMap::get)
             .sortedBy { it.packageName }
-        val removed = (oldKeys - newKeys)
-            .mapNotNull(oldMap::get)
-            .sortedBy { it.packageName }
         val changed = (oldKeys intersect newKeys)
             .mapNotNull { packageName ->
                 val oldEntry = oldMap.getValue(packageName)
                 val newEntry = newMap.getValue(packageName)
 
-                if (entryHash(oldEntry) != entryHash(newEntry)) {
+                if (oldEntry != newEntry) {
                     newEntry
                 } else {
                     null
@@ -287,7 +352,7 @@ class APKCollector(
             }
             .sortedBy { it.packageName }
 
-        return listOf(added, removed, changed)
+        return added to changed
     }
 
     private fun normalizeEntries(entries: List<PackageEntry>): List<PackageEntry> {
@@ -296,29 +361,6 @@ class APKCollector(
                 entry.copy(givenPermisions = entry.givenPermisions.sorted())
             }
             .sortedBy { it.packageName }
-    }
-
-    private fun entryHash(entry: PackageEntry): String {
-        val normalizedPermissions = entry.givenPermisions.sorted().joinToString("|")
-        val raw = listOf(
-            entry.packageName,
-            entry.apkPath,
-            entry.lastUpdateDate,
-            normalizedPermissions,
-            entry.lastVerdict.orEmpty()
-        ).joinToString("||")
-        return sha256(raw)
-    }
-
-    private fun stateHash(entries: List<PackageEntry>): String {
-        val raw = normalizeEntries(entries)
-            .joinToString("\n") { entry -> "${entry.packageName}:${entryHash(entry)}" }
-        return sha256(raw)
-    }
-
-    private fun sha256(value: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
-        return digest.joinToString(separator = "") { "%02x".format(it) }
     }
 
     private fun sha256File(file: File): String {
@@ -331,6 +373,16 @@ class APKCollector(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun JSONObject.toMap(): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+        val keys = keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            result[key] = opt(key)
+        }
+        return result
     }
 
 }
