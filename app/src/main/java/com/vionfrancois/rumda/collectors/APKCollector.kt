@@ -109,6 +109,7 @@ class APKCollector(
 
         val maliciousVerdict = mutableListOf<String>()
 
+        var i = 0
         // Ask analysis for changed APK
         for (added in addedEntries) {
             val analysis = requestAPKAnalysis(added.apkPath)
@@ -117,14 +118,25 @@ class APKCollector(
             if (analysis.malicious) {
                 maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
             }
+            i++
+            if(i >= 15){
+                // We want to avoid huge processing
+                break
+            }
         }
 
+        i = 0
         for (modified in changedEntries) {
             val analysis = requestAPKAnalysis(modified.apkPath)
             val index = newState.indexOf(modified)
             newState[index] = modified.copy(lastAnalysis = analysis)
             if (analysis.malicious) {
                 maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
+            }
+            i++
+            if(i >= 15){
+                // We want to avoid huge processing
+                break
             }
         }
 
@@ -147,6 +159,7 @@ class APKCollector(
         prefs.edit()
             .putString(PREF_LAST_APK_LIST, json)
             .apply()
+        Log.d(TAG, "Saved state")
     }
 
 

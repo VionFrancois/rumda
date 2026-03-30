@@ -15,20 +15,21 @@ import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "AdbManager"
-private const val RUN_COMMAND_TIMEOUT_MS = 10_000L
+private const val RUN_COMMAND_RETRIES = 1
+private const val PULL_FILE_RETRIES = 1
+private const val SHELL_STAGE_OK_MARKER = "__RUMDA_STAGE_OK__"
 
 class AdbManager(private val appContext: Context) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val commandExecutor: ExecutorService = Executors.newCachedThreadPool()
     private val _adbState = MutableStateFlow<AdbState>(AdbState.Initial)
     val adbState: StateFlow<AdbState> = _adbState.asStateFlow()
 
     private val adbConnectionManager: AdbConnectionManager =
         AdbConnectionManager.getInstance(appContext) as AdbConnectionManager
+    private val adbShell = AdbShell(adbConnectionManager, timeoutMs = 30_000L, inactivityMs = 5_000L, retries = 1)
+    private val adbSync = AdbSync(adbConnectionManager)
 
     init {
         adbConnectionManager.setTimeout(10, TimeUnit.SECONDS)
@@ -115,56 +116,22 @@ class AdbManager(private val appContext: Context) {
 
     suspend fun runCommand(command: String): String = withContext(Dispatchers.IO) {
         try {
-            if (!adbConnectionManager.isConnected) {
+            if (!ensureConnected()) {
                 return@withContext "Not connected. Pair and connect first."
             }
-            val streamRef = AtomicReference<io.github.muntashirakon.adb.AdbStream?>()
-            val future = commandExecutor.submit<String> {
-                val stream = adbConnectionManager.openStream("shell:$command")
-                streamRef.set(stream)
-                val out = StringBuilder()
+            var lastError: Throwable? = null
+            repeat(RUN_COMMAND_RETRIES + 1) { attempt ->
                 try {
-                    stream.openInputStream().bufferedReader().use { reader ->
-                        val buf = CharArray(1024)
-                        while (true) {
-                            val n = try {
-                                reader.read(buf)
-                            } catch (io: IOException) {
-                                // Some devices close ADB streams aggressively after command completion.
-                                if (io.message?.contains("Stream closed", ignoreCase = true) == true) {
-                                    break
-                                }
-                                throw io
-                            }
-                            if (n < 0) break
-                            out.append(buf, 0, n)
-                        }
+                    return@withContext adbShell.exec(command)
+                } catch (t: Throwable) {
+                    lastError = t
+                    Log.w(TAG, "runCommand attempt ${attempt + 1} failed for `$command`: ${t.message}")
+                    if (attempt < RUN_COMMAND_RETRIES) {
+                        reconnectBestEffort()
                     }
-                } finally {
-                    try {
-                        stream.close()
-                    } catch (_: Throwable) {
-                    }
-                    streamRef.set(null)
                 }
-                out.toString().ifBlank { "(no output)" }
             }
-
-            try {
-                future.get(RUN_COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            } catch (_: TimeoutException) {
-                Log.e(TAG, "runCommand timed out for `$command`")
-                try {
-                    streamRef.get()?.close()
-                } catch (_: Throwable) {
-                }
-                try {
-                    adbConnectionManager.disconnect()
-                } catch (_: Throwable) {
-                }
-                future.cancel(true)
-                "Command failed: timeout"
-            }
+            "Command failed: ${lastError?.message ?: "unknown error"}"
         } catch (t: Throwable) {
             Log.e(TAG, "runCommand failed", t)
             "Command failed: ${t.message}"
@@ -172,94 +139,100 @@ class AdbManager(private val appContext: Context) {
     }
 
     suspend fun pullFile(remotePath: String, destination: File): File = withContext(Dispatchers.IO) {
-        try {
-            if (!adbConnectionManager.isConnected) {
-                throw IOException("Not connected. Pair and connect first.")
-            }
-            destination.parentFile?.mkdirs()
-            val stream = adbConnectionManager.openStream("sync:")
+        var lastError: Throwable? = null
+        repeat(PULL_FILE_RETRIES + 1) { attempt ->
             try {
-                val input = stream.openInputStream()
-                val output = stream.openOutputStream()
+                if (!ensureConnected()) {
+                    throw IOException("Not connected. Pair and connect first.")
+                }
+                adbSync.pull(remotePath, destination)
+                return@withContext destination
+            } catch (t: Throwable) {
+                lastError = t
+                Log.w(TAG, "pullFile attempt ${attempt + 1} failed for `$remotePath`: ${t.message}")
 
-                val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-                // Start an ADB sync "receive file" request for the remote path.
-                output.write("RECV".toByteArray(Charsets.US_ASCII))
-                writeInt(pathBytes.size, output)
-                output.write(pathBytes)
-                output.flush()
-
-                destination.outputStream().buffered().use { fileOutput ->
-                    val idBuffer = ByteArray(4)
-                    val lengthBuffer = ByteArray(4)
-                    val chunkBuffer = ByteArray(DEFAULT_BUFFER_SIZE)
-
-                    while (true) {
-                        readFully(input, idBuffer, 4)
-                        readFully(input, lengthBuffer, 4)
-
-                        // Each sync packet is 4-byte command id + 4-byte little-endian length.
-                        val id = String(idBuffer, Charsets.US_ASCII)
-                        val length = (lengthBuffer[0].toInt() and 0xff) or
-                            ((lengthBuffer[1].toInt() and 0xff) shl 8) or
-                            ((lengthBuffer[2].toInt() and 0xff) shl 16) or
-                            ((lengthBuffer[3].toInt() and 0xff) shl 24)
-
-                        when (id) {
-                            "DATA" -> {
-                                // DATA packets contain the next chunk of the remote file.
-                                var remaining = length
-                                while (remaining > 0) {
-                                    val count = input.read(chunkBuffer, 0, minOf(chunkBuffer.size, remaining))
-                                    if (count < 0) {
-                                        throw IOException("Unexpected end of ADB sync file payload.")
-                                    }
-                                    fileOutput.write(chunkBuffer, 0, count)
-                                    remaining -= count
-                                }
-                            }
-                            "DONE" -> break
-                            "FAIL" -> {
-                                // FAIL packets return a human-readable error message from adbd.
-                                val messageBuffer = ByteArray(length)
-                                readFully(input, messageBuffer, length)
-                                val message = String(messageBuffer, Charsets.UTF_8)
-                                throw IOException("ADB sync failed: $message")
-                            }
-                            else -> throw IOException("Unexpected ADB sync response: $id")
-                        }
+                // For some reason, adb can't pull some files despite they are readable
+                // We then fall back to doing "cat > tmpfile" then pulling the tmp file
+                if (isPermissionDeniedError(t)) {
+                    val pulledByShellStage = runCatching {
+                        pullViaShellStaging(remotePath, destination)
+                    }.getOrElse { stageError ->
+                        Log.w(TAG, "pullFile shell-stage fallback failed for `$remotePath`: ${stageError.message}")
+                        false
                     }
-                    fileOutput.flush()
+                    if (pulledByShellStage) {
+                        Log.i(TAG, "pullFile succeeded via shell-stage fallback for `$remotePath`")
+                        return@withContext destination
+                    }
                 }
-            } finally {
-                try {
-                    stream.close()
-                } catch (_: Throwable) {
+
+                if (attempt < PULL_FILE_RETRIES) {
+                    reconnectBestEffort()
                 }
             }
-            destination
+        }
+        Log.e(TAG, "pullFile failed", lastError)
+        throw IOException("Sync pull failed: ${lastError?.message}", lastError)
+    }
+
+    private fun isPermissionDeniedError(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("permission denied", ignoreCase = true)
+    }
+
+    private fun pullViaShellStaging(remotePath: String, destination: File): Boolean {
+        val originalFilename = remotePath.substringAfterLast('/').ifBlank { "file.apk" }
+        val stagedPath = "/data/local/tmp/rumda_$originalFilename"
+
+        val src = shSingleQuote(remotePath)
+        val dst = shSingleQuote(stagedPath)
+
+        val stageCommand =
+            "cat $src > $dst && chmod 0644 $dst && /system/bin/printf \"%s\\n\" \"$SHELL_STAGE_OK_MARKER\""
+
+        return try {
+            val stageOutput = adbShell.exec(stageCommand)
+            if (!stageOutput.contains(SHELL_STAGE_OK_MARKER)) {
+                Log.w(TAG, "shell-stage did not confirm success for `$remotePath`: $stageOutput")
+                return false
+            }
+
+            adbSync.pull(stagedPath, destination)
+            true
+        } finally {
+            runCatching {
+                adbShell.exec("rm -f $dst")
+            }
+        }
+    }
+
+    private fun shSingleQuote(value: String): String {
+        val escaped = value.replace("'", "'\"'\"'")
+        return "'$escaped'"
+    }
+
+    private fun ensureConnected(): Boolean {
+        if (adbConnectionManager.isConnected) {
+            return true
+        }
+        return try {
+            val connected = adbConnectionManager.connectTls(appContext, 5000)
+            if (connected) {
+                _adbState.value = AdbState.ConnectedIdle
+            }
+            connected
         } catch (t: Throwable) {
-            Log.e(TAG, "pullFile failed", t)
-            throw IOException("Sync pull failed: ${t.message}", t)
+            Log.w(TAG, "ensureConnected failed", t)
+            false
         }
     }
 
-    private fun writeInt(value: Int, output: io.github.muntashirakon.adb.AdbOutputStream) {
-        output.write(value and 0xff)
-        output.write((value ushr 8) and 0xff)
-        output.write((value ushr 16) and 0xff)
-        output.write((value ushr 24) and 0xff)
-    }
-
-    private fun readFully(input: io.github.muntashirakon.adb.AdbInputStream, buffer: ByteArray, length: Int) {
-        var bytesRead = 0
-        while (bytesRead < length) {
-            val n = input.read(buffer, bytesRead, length - bytesRead)
-            if (n < 0) {
-                throw IOException("Unexpected end of ADB sync stream.")
-            }
-            bytesRead += n
+    private fun reconnectBestEffort() {
+        try {
+            adbConnectionManager.disconnect()
+        } catch (_: Throwable) {
         }
+        ensureConnected()
     }
 
     fun handleWirelessDebuggingDisabled() {
@@ -276,6 +249,5 @@ class AdbManager(private val appContext: Context) {
     fun cleanup() {
         stopAdbPairingService()
         executor.shutdown()
-        commandExecutor.shutdownNow()
     }
 }
