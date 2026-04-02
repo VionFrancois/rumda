@@ -238,6 +238,7 @@ class APKCollector(
                 val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
+                    setChunkedStreamingMode(0) // Prevent memory exhaustion & Android OS network crash on huge APK uploads
                     connectTimeout = 10_000
                     readTimeout = 300_000
                     setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
