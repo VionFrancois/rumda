@@ -40,8 +40,9 @@ class APKCollector(
 
             return packageName == other.packageName &&
                 apkPath == other.apkPath &&
-                lastUpdateDate == other.lastUpdateDate &&
-                givenPermisions.sorted() == other.givenPermisions.sorted()
+                lastUpdateDate == other.lastUpdateDate
+                // TODO: put permissions back
+                // && givenPermisions.sorted() == other.givenPermisions.sorted()
         }
     }
 
@@ -67,8 +68,8 @@ class APKCollector(
         }
     }
 
-    override fun fetchLastState(): List<PackageEntry> {
-        val json = prefs.getString(PREF_LAST_APK_LIST, null) ?: return emptyList()
+    override fun fetchLastState(): Pair<List<PackageEntry>, Boolean>{
+        val json = prefs.getString(PREF_LAST_APK_LIST, null) ?: return Pair(emptyList(), false)
         return deserializePackageList(json)
     }
 
@@ -85,13 +86,16 @@ class APKCollector(
         for (pkg in packageList) {
             val packageOutput = adbManager.runCommand("dumpsys package ${pkg[0]}")
             val lastUpdateDate = parseLastUpdateTime(packageOutput)
-            val grantedPermissions = parseGrantedPermissions(packageOutput)
+            // TODO: put permissions back
+            // val grantedPermissions = parseGrantedPermissions(packageOutput)
 
             val packageEntry = PackageEntry(
                 packageName = pkg[0],
                 apkPath = pkg[1],
                 lastUpdateDate = lastUpdateDate,
-                givenPermisions = grantedPermissions,
+                // TODO: put permissions back
+                // givenPermisions = grantedPermissions,
+                givenPermisions = emptyList(),
                 lastAnalysis = null
             )
             apkCollection.add(packageEntry)
@@ -103,7 +107,9 @@ class APKCollector(
         return normalizedEntries
     }
 
-    override suspend fun pushDiffToRemote(oldState: List<PackageEntry>, newState: MutableList<PackageEntry>): MutableList<String> {
+    override suspend fun pushDiffToRemote(oldState: List<PackageEntry>, newState: MutableList<PackageEntry>): Pair<MutableList<String>, MutableList<PackageEntry>> {
+        recoverAnalysesFromPreviousState(oldState, newState)
+
         // Find changes
         val (addedEntries, changedEntries) = diffStates(oldState, newState)
 
@@ -112,6 +118,7 @@ class APKCollector(
         var i = 0
         // Ask analysis for changed APK
         for (added in addedEntries) {
+            Log.d(TAG, "Processing ${i} of 10 : ${added.packageName}")
             val analysis = requestAPKAnalysis(added.apkPath)
             val index = newState.indexOf(added)
             newState[index] = added.copy(lastAnalysis = analysis)
@@ -119,7 +126,7 @@ class APKCollector(
                 maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
             }
             i++
-            if(i >= 15){
+            if(i >= 10){
                 // We want to avoid huge processing
                 break
             }
@@ -127,6 +134,7 @@ class APKCollector(
 
         i = 0
         for (modified in changedEntries) {
+            Log.d(TAG, "Processing ${i} of 10 : ${modified.packageName}")
             val analysis = requestAPKAnalysis(modified.apkPath)
             val index = newState.indexOf(modified)
             newState[index] = modified.copy(lastAnalysis = analysis)
@@ -134,13 +142,33 @@ class APKCollector(
                 maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
             }
             i++
-            if(i >= 15){
+            if(i >= 10){
                 // We want to avoid huge processing
                 break
             }
         }
 
-        return maliciousVerdict
+        return Pair(maliciousVerdict, newState)
+    }
+
+    private fun recoverAnalysesFromPreviousState(
+        oldState: List<PackageEntry>,
+        newState: MutableList<PackageEntry>
+    ) {
+        val oldByPackageName = oldState.associateBy { it.packageName }
+
+        for (index in newState.indices) {
+            val currentEntry = newState[index]
+            val oldEntry = oldByPackageName[currentEntry.packageName] ?: continue
+
+            if (
+                currentEntry.lastAnalysis == null &&
+                oldEntry.lastAnalysis != null &&
+                currentEntry.lastUpdateDate == oldEntry.lastUpdateDate
+            ) {
+                newState[index] = currentEntry.copy(lastAnalysis = oldEntry.lastAnalysis)
+            }
+        }
     }
 
     override suspend fun handleVerdict(response: MutableList<String>) {
@@ -175,6 +203,8 @@ class APKCollector(
         val hashConnection = (hashUrl.openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
+            connectTimeout = 10_000
+            readTimeout = 60_000
             setRequestProperty("Content-Type", "application/json")
         }
 
@@ -208,6 +238,8 @@ class APKCollector(
                 val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
+                    connectTimeout = 10_000
+                    readTimeout = 300_000
                     setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
                 }
 
@@ -301,16 +333,18 @@ class APKCollector(
                     .put("packageName", item.packageName)
                     .put("apkPath", item.apkPath)
                     .put("lastUpdateDate", item.lastUpdateDate)
-                    .put("givenPermissions", item.givenPermisions)
+                    // TODO: put permissions back
+                    // .put("givenPermissions", item.givenPermisions)
                     .put("lastAnalysis", item.lastAnalysis?.toJson())
             )
         }
         return jsonArray.toString()
     }
 
-    private fun deserializePackageList(json: String): List<PackageEntry> {
+    private fun deserializePackageList(json: String): Pair<List<PackageEntry>, Boolean> {
         val array = JSONArray(json)
         val result = mutableListOf<PackageEntry>()
+        var isComplete = true
         for (i in 0 until array.length()) {
             val obj = array.optJSONObject(i) ?: continue
             val packageName = obj.optString("packageName")
@@ -318,12 +352,13 @@ class APKCollector(
             val lastUpdateDate = obj.optString("lastUpdateDate")
 
             val givenPermissions = mutableListOf<String>()
-            val permissionsArray = obj.optJSONArray("givenPermissions")
-            if (permissionsArray != null) {
-                for (j in 0 until permissionsArray.length()) {
-                    givenPermissions.add(permissionsArray.getString(j))
-                }
-            }
+            // TODO: put permissions back
+            // val permissionsArray = obj.optJSONArray("givenPermissions")
+            // if (permissionsArray != null) {
+            //     for (j in 0 until permissionsArray.length()) {
+            //         givenPermissions.add(permissionsArray.getString(j))
+            //     }
+            // }
 
             val lastAnalysis = obj.optJSONObject("lastAnalysis")?.let { analysisJson ->
                 APKAnalysis(
@@ -335,11 +370,16 @@ class APKCollector(
                 )
             }
 
+            if(lastAnalysis == null){
+                isComplete = false
+            }
+
+
             if (packageName.isNotBlank() && apkPath.isNotBlank()) {
                 result.add(PackageEntry(packageName, apkPath, lastUpdateDate, givenPermissions, lastAnalysis))
             }
         }
-        return result
+        return Pair(result, isComplete)
     }
 
     private fun diffStates(oldEntries: List<PackageEntry>, newEntries: List<PackageEntry>): Pair<List<PackageEntry>, List<PackageEntry>> {
@@ -349,10 +389,19 @@ class APKCollector(
         val oldKeys = oldMap.keys
         val newKeys = newMap.keys
 
-        val added = (newKeys - oldKeys)
+        val packagesNeedingAnalysis = (oldKeys intersect newKeys)
+            .filter { packageName -> oldMap[packageName]?.lastAnalysis == null }
+            .toSet()
+
+        Log.d(TAG, "packages needing analysis : ${packagesNeedingAnalysis}")
+
+        val addedPackageNames = (newKeys - oldKeys) + packagesNeedingAnalysis
+
+        val added = addedPackageNames
             .mapNotNull(newMap::get)
             .sortedBy { it.packageName }
         val changed = (oldKeys intersect newKeys)
+            .filterNot { it in addedPackageNames }
             .mapNotNull { packageName ->
                 val oldEntry = oldMap.getValue(packageName)
                 val newEntry = newMap.getValue(packageName)
@@ -370,9 +419,10 @@ class APKCollector(
 
     private fun normalizeEntries(entries: List<PackageEntry>): List<PackageEntry> {
         return entries
-            .map { entry ->
-                entry.copy(givenPermisions = entry.givenPermisions.sorted())
-            }
+            // TODO: put permissions back
+            // .map { entry ->
+            //     entry.copy(givenPermisions = entry.givenPermisions.sorted())
+            // }
             .sortedBy { it.packageName }
     }
 
