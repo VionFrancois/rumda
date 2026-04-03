@@ -1,13 +1,17 @@
+import hashlib
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from cache_store import get_cached_verdict, init_cache_db, set_cached_verdict
 from quark_analysis import analyze_apk_with_quark
 from virustotal import check_hash
 
 app = FastAPI(title="RuMDA API")
+CACHE_TTL_SECONDS = 60 * 60 * 24 * 14 # 14 days
+init_cache_db()
 
 
 class HashRequest(BaseModel):
@@ -16,8 +20,14 @@ class HashRequest(BaseModel):
 
 @app.post("/analysis/apk/hash")
 def analyze_apk_hash(payload: HashRequest) -> dict:
+    cached = get_cached_verdict(payload.hash)
+    if cached is not None:
+        return cached
+
     try:
-        return format_hash_analysis(payload.hash, check_hash(payload.hash))
+        verdict = format_hash_analysis(payload.hash, check_hash(payload.hash))
+        set_cached_verdict(payload.hash, verdict, CACHE_TTL_SECONDS)
+        return verdict
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -26,12 +36,17 @@ def analyze_apk_hash(payload: HashRequest) -> dict:
 async def analyze_apk_file(file: UploadFile = File(...)) -> dict:
     # TODO : Ensure the uploaded file is a valid APK
     try:
+        content = await file.read()
+        file_hash = hashlib.sha256(content).hexdigest()
+
         with NamedTemporaryFile(delete=False, suffix=".apk") as tmp:
             tmp_path = Path(tmp.name)
-            tmp.write(await file.read())
+            tmp.write(content)
             result = analyze_apk_with_quark(str(tmp_path))
 
-        return format_file_analysis(result)
+        verdict = format_file_analysis(file_hash, result)
+        set_cached_verdict(file_hash, verdict, CACHE_TTL_SECONDS)
+        return verdict
     
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"APK analysis failed: {exc}") from exc
@@ -76,7 +91,7 @@ def format_hash_analysis(file_hash: str, result: dict) -> dict:
     }
 
 
-def format_file_analysis(result: dict) -> dict:
+def format_file_analysis(file_hash: str, result: dict) -> dict:
     malicious = bool(result.get("malicious", False))
     threat_level = result.get("threat_level", "Unknown")
     total_score = int(result.get("total_score", 0) or 0)
@@ -93,6 +108,7 @@ def format_file_analysis(result: dict) -> dict:
         "malicious": malicious,
         "degree": degree,
         "details": {
+            "hash": file_hash,
             "total_score": total_score
         },
     }

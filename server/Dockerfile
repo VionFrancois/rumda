@@ -8,6 +8,7 @@ RUN pip install -r requirements.txt
 
 
 COPY server.py ./server.py
+COPY cache_store.py ./cache_store.py
 COPY quark_analysis.py ./quark_analysis.py
 COPY virustotal.py ./virustotal.py
 COPY virustotal-api-key ./virustotal-api-key

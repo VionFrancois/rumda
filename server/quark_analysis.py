@@ -2,7 +2,7 @@ import json
 from quark.report import Report
 
 def analyze_apk_with_quark(apk_path: str) -> dict:
-    rule_path = "./quark-rules"
+    rule_path = "./quark-rules/rules"
 
     report = Report()
     report.analysis(apk_path, rule_path)
