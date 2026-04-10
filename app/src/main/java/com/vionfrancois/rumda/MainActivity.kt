@@ -1,12 +1,15 @@
 package com.vionfrancois.rumda
 
 import android.Manifest
+import android.app.ActivityOptions
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.GestureDetector
 import android.provider.Settings
+import android.view.MotionEvent
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.TextView
@@ -18,7 +21,9 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.vionfrancois.rumda.cadb.AdbCommandService
 import com.vionfrancois.rumda.cadb.AdbManager
 import com.vionfrancois.rumda.cadb.AdbState
+import com.google.android.material.bottomnavigation.BottomNavigationView
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -30,6 +35,8 @@ class MainActivity : AppCompatActivity() {
         private const val CATEGORY_APKS = "APKS"
         private const val CATEGORY_IPS = "IPS"
         private const val CATEGORY_SERVICES = "SERVICES"
+        private const val SWIPE_DISTANCE_THRESHOLD_PX = 120
+        private const val SWIPE_VELOCITY_THRESHOLD = 200
     }
 
     private lateinit var prefs: SharedPreferences
@@ -41,9 +48,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var apkCheckBox: CheckBox
     private lateinit var ipsCheckBox: CheckBox
     private lateinit var servicesCheckBox: CheckBox
+    private lateinit var bottomNavigationView: BottomNavigationView
+    private lateinit var swipeGestureDetector: GestureDetector
     private var wirelessDebuggingDialogVisible = false
     private var notificationsDialogVisible = false
     private var backgroundLoopStarted = false
+    private var tabSwitchInProgress = false
 
     private val notificationsPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -64,6 +74,7 @@ class MainActivity : AppCompatActivity() {
 
         adbManager = AdbManager(applicationContext)
         setContentView(R.layout.activity_main)
+        setupSwipeNavigation()
         bindViews()
         refreshUi(triggerAutoActions = false)
 
@@ -79,13 +90,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        tabSwitchInProgress = false
         if (!prefs.getBoolean(PREF_ONBOARDING_COMPLETED, false)) {
             startActivity(Intent(this, OnboardingActivity::class.java))
             finish()
             return
         }
         if (!::adbManager.isInitialized) return
+        bottomNavigationView.selectedItemId = R.id.navigation_configuration
         refreshUi(triggerAutoActions = true)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (::swipeGestureDetector.isInitialized) {
+            swipeGestureDetector.onTouchEvent(ev)
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onDestroy() {
@@ -103,8 +123,66 @@ class MainActivity : AppCompatActivity() {
         apkCheckBox = findViewById(R.id.apkCheckBox)
         ipsCheckBox = findViewById(R.id.ipsCheckBox)
         servicesCheckBox = findViewById(R.id.servicesCheckBox)
+        bottomNavigationView = findViewById(R.id.bottomNavigationView)
+        setupBottomNavigation()
         restoreMonitoringSelections()
         bindMonitoringPreferenceListeners()
+    }
+
+    private fun setupBottomNavigation() {
+        bottomNavigationView.selectedItemId = R.id.navigation_configuration
+        bottomNavigationView.setOnItemSelectedListener { item ->
+            when (item.itemId) {
+                R.id.navigation_configuration -> true
+                R.id.navigation_threats -> {
+                    openThreatsTab()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun setupSwipeNavigation() {
+        swipeGestureDetector = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onFling(
+                    e1: MotionEvent?,
+                    e2: MotionEvent,
+                    velocityX: Float,
+                    velocityY: Float,
+                ): Boolean {
+                    if (e1 == null) return false
+                    val deltaX = e2.x - e1.x
+                    val deltaY = e2.y - e1.y
+                    if (abs(deltaX) < SWIPE_DISTANCE_THRESHOLD_PX) return false
+                    if (abs(deltaX) < abs(deltaY)) return false
+                    if (abs(velocityX) < SWIPE_VELOCITY_THRESHOLD) return false
+
+                    if (deltaX < 0) {
+                        openThreatsTab()
+                        return true
+                    }
+                    return false
+                }
+            },
+        )
+    }
+
+    private fun openThreatsTab() {
+        if (tabSwitchInProgress) return
+        tabSwitchInProgress = true
+
+        val intent = Intent(this, ThreatsActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val options = ActivityOptions.makeCustomAnimation(
+            this,
+            R.anim.slide_in_right,
+            R.anim.slide_out_left,
+        )
+        startActivity(intent, options.toBundle())
     }
 
     private fun refreshUi(triggerAutoActions: Boolean) {

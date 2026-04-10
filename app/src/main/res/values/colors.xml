@@ -15,4 +15,7 @@
     <color name="rumda_text_dark">#17313E</color>
     <color name="rumda_text_muted">#526067</color>
     <color name="rumda_secondary_button">#264758</color>
+    <color name="rumda_threat_red_background">#FDECEA</color>
+    <color name="rumda_threat_red_border">#D84343</color>
+    <color name="rumda_threat_history_background">#E9EEF1</color>
 </resources>

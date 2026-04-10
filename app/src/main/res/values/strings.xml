@@ -39,6 +39,7 @@
     <string name="main_collection_apk">APK files</string>
     <string name="main_collection_ips">IP connections</string>
     <string name="main_collection_services">Background services</string>
+    <string name="main_open_threats">Open threats center</string>
     <string name="dashboard_status_connecting">Connecting now</string>
     <string name="dashboard_status_connected">Connected</string>
     <string name="dashboard_status_pairing">Pairing required</string>
@@ -59,8 +60,8 @@
     <string name="notifications_dialog_open_settings">Allow notifications</string>
     <string name="notifications_dialog_cancel">Not now</string>
 
-    <string name="notification_channel_adb_loop">ADB Background Loop</string>
-    <string name="notification_adb_loop_title">RuMDA background ADB loop</string>
+    <string name="notification_channel_adb_loop">ADB running in background</string>
+    <string name="notification_adb_loop_title">RuMDA monitoring in background</string>
     <string name="notification_channel_adb_pairing">ADB Pairing</string>
     <string name="notification_adb_pairing_succeed_title">ADB Pairing Successful</string>
     <string name="notification_adb_pairing_failed_title">ADB Pairing Failed</string>
@@ -69,4 +70,34 @@
     <string name="notification_adb_pairing_stop_searching">Stop searching</string>
     <string name="notification_adb_pairing_service_found_title">ADB pairing service found on port %d</string>
     <string name="notification_adb_pairing_working_title">Pairing with ADB service</string>
+
+    <string name="notification_threat_detected_title">Threat detected by RuMDA</string>
+    <string name="notification_threat_channel_description">Critical alerts about detected threats</string>
+    <plurals name="notification_threat_detected_body">
+        <item quantity="one">%d active threat detected. Tap to review and mitigate.</item>
+        <item quantity="other">%d active threats detected. Tap to review and mitigate.</item>
+    </plurals>
+
+    <string name="threats_title">Threats center</string>
+    <string name="threats_subtitle">Review detected threats and choose how to handle them.</string>
+    <string name="threats_active_section">Active threats</string>
+    <string name="threats_history_section">Threat history</string>
+    <string name="threats_active_empty">No active threats right now.</string>
+    <string name="threats_history_empty">No threat history yet.</string>
+    <string name="threats_action_ignore">Ignore</string>
+    <string name="threats_action_mitigate">Mitigate</string>
+    <string name="threats_metadata_kind">Kind: %1$s</string>
+    <string name="threats_metadata_severity">Severity: %1$s</string>
+    <string name="threats_status_active">Active</string>
+    <string name="threats_status_ignored">Ignored</string>
+    <string name="threats_status_mitigated">Mitigated</string>
+    <string name="threats_history_status">%1$s on %2$s</string>
+    <string name="threats_confirm_ignore_title">Ignore threat?</string>
+    <string name="threats_confirm_mitigate_title">Mitigate threat?</string>
+    <string name="threats_confirm_ignore_message">Ignore threat "%1$s"? It will be moved to history.</string>
+    <string name="threats_confirm_mitigate_message">Mark threat "%1$s" as mitigated? It will be moved to history.</string>
+    <string name="threats_confirm_yes">Confirm</string>
+    <string name="threats_confirm_cancel">Cancel</string>
+    <string name="navigation_configuration">Configuration</string>
+    <string name="navigation_threats">Threats</string>
 </resources>

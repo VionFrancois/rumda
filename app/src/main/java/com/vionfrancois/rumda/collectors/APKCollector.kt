@@ -4,6 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.vionfrancois.rumda.MainActivity
 import com.vionfrancois.rumda.cadb.AdbManager
+import com.vionfrancois.rumda.threats.ThreatKind
+import com.vionfrancois.rumda.threats.ThreatNotificationHelper
+import com.vionfrancois.rumda.threats.ThreatStoring
+import com.vionfrancois.rumda.threats.ThreatSeverity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,6 +30,8 @@ class APKCollector(
 
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("apk_collector_state", Context.MODE_PRIVATE)
+    private val threatStoring = ThreatStoring(appContext)
+    private val threatNotificationHelper = ThreatNotificationHelper(appContext)
     private var lastCollectedRaw: String? = null
     private var lastCollectedEntries: List<PackageEntry> = emptyList()
     private var lastPulledApk: File? = null
@@ -137,11 +143,11 @@ class APKCollector(
             val analysis = runCatching { requestAPKAnalysis(added.apkPath) }
                 .getOrElse { error ->
                     Log.w(TAG, "Analysis failed for ${added.packageName}: ${error.message}")
-                    unavailableAnalysis(error)
+                    null
                 }
             val index = newState.indexOf(added)
             newState[index] = added.copy(lastAnalysis = analysis)
-            if (analysis.malicious) {
+            if (analysis?.malicious == true) {
                 maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
             }
             i++
@@ -157,11 +163,11 @@ class APKCollector(
             val analysis = runCatching { requestAPKAnalysis(modified.apkPath) }
                 .getOrElse { error ->
                     Log.w(TAG, "Analysis failed for ${modified.packageName}: ${error.message}")
-                    unavailableAnalysis(error)
+                    null
                 }
             val index = newState.indexOf(modified)
             newState[index] = modified.copy(lastAnalysis = analysis)
-            if (analysis.malicious) {
+            if (analysis?.malicious == true) {
                 maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
             }
             i++
@@ -196,8 +202,40 @@ class APKCollector(
 
     override suspend fun handleVerdict(response: MutableList<String>) {
         if (response.isNotEmpty()) {
-            // TODO : Send notification
-            Log.w(TAG, "Malicious packages detected: ${response.joinToString()}")
+            val threatCandidates = response.mapNotNull { verdictLine ->
+                val packageName = verdictLine.substringBefore(":").trim()
+                if (packageName.isBlank()) return@mapNotNull null
+
+                val rawDegree = verdictLine.substringAfter(":", "UNKNOWN").trim()
+                threatStoring.buildThreat(
+                    kind = ThreatKind.APK,
+                    title = packageName,
+                    summary = "Potential malicious APK detected",
+                    severity = mapDegreeToSeverity(rawDegree),
+                    sourceCollector = "APKS",
+                    attributes = mapOf(
+                        "packageName" to packageName,
+                        "degree" to rawDegree,
+                        "rawVerdict" to verdictLine,
+                    ),
+                )
+            }
+
+            val insertedThreatCount = threatStoring.addActiveThreats(threatCandidates)
+            if (insertedThreatCount > 0) {
+                threatNotificationHelper.notifyThreatDetected(insertedThreatCount)
+            }
+        }
+    }
+
+    private fun mapDegreeToSeverity(rawDegree: String): ThreatSeverity {
+        val normalized = rawDegree.trim().uppercase()
+        return when {
+            normalized.contains("CRIT") -> ThreatSeverity.CRITICAL
+            normalized.contains("HIGH") -> ThreatSeverity.HIGH
+            normalized.contains("MED") -> ThreatSeverity.MEDIUM
+            normalized.contains("LOW") -> ThreatSeverity.LOW
+            else -> ThreatSeverity.MEDIUM
         }
     }
 
@@ -500,18 +538,6 @@ class APKCollector(
             result[key] = opt(key)
         }
         return result
-    }
-
-    private fun unavailableAnalysis(error: Throwable): APKAnalysis {
-        return APKAnalysis(
-            found = false,
-            analysisType = "error",
-            malicious = false,
-            degree = "unknown",
-            details = mapOf(
-                "reason" to (error.message ?: error.javaClass.simpleName)
-            )
-        )
     }
 
 }
