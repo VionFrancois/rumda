@@ -20,6 +20,7 @@ private const val TAG = "AdbManager"
 private const val RUN_COMMAND_RETRIES = 1
 private const val PULL_FILE_RETRIES = 1
 private const val SHELL_STAGE_OK_MARKER = "__RUMDA_STAGE_OK__"
+private const val ADB_CONNECT_TIMEOUT_MS = 15_000L
 
 class AdbManager(private val appContext: Context) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -104,7 +105,7 @@ class AdbManager(private val appContext: Context) {
                 return
             }
             _adbState.value = AdbState.Connecting
-            val connected = adbConnectionManager.connectTls(appContext, 5000)
+            val connected = adbConnectionManager.connectTls(appContext, ADB_CONNECT_TIMEOUT_MS)
             _adbState.value = if (connected) AdbState.ConnectedIdle else AdbState.Ready
         } catch (_: AdbPairingRequiredException) {
             _adbState.value = AdbState.RequisitesMissing

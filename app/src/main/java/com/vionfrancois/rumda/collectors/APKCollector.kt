@@ -6,10 +6,18 @@ import com.vionfrancois.rumda.MainActivity
 import com.vionfrancois.rumda.cadb.AdbManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 class APKCollector(
     private val adbManager: AdbManager,
@@ -25,6 +33,14 @@ class APKCollector(
     private companion object {
         const val TAG = "APKCollector"
         const val PREF_LAST_APK_LIST = "last_apk_list"
+        const val MAX_ANALYSIS_PER_TICK = 10
+
+        val HTTP_CLIENT: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.MINUTES)
+            .readTimeout(15, TimeUnit.MINUTES)
+            .callTimeout(20, TimeUnit.MINUTES)
+            .build()
     }
 
     data class PackageEntry(
@@ -99,7 +115,6 @@ class APKCollector(
                 lastAnalysis = null
             )
             apkCollection.add(packageEntry)
-            Log.d(TAG, "Created Entry for ${pkg[0]} ${packageList.size - i - 1} remaining")
             i++
         }
 
@@ -118,15 +133,19 @@ class APKCollector(
         var i = 0
         // Ask analysis for changed APK
         for (added in addedEntries) {
-            Log.d(TAG, "Processing ${i} of 10 : ${added.packageName}")
-            val analysis = requestAPKAnalysis(added.apkPath)
+            Log.d(TAG, "Processing ${i} of $MAX_ANALYSIS_PER_TICK : ${added.packageName}")
+            val analysis = runCatching { requestAPKAnalysis(added.apkPath) }
+                .getOrElse { error ->
+                    Log.w(TAG, "Analysis failed for ${added.packageName}: ${error.message}")
+                    unavailableAnalysis(error)
+                }
             val index = newState.indexOf(added)
             newState[index] = added.copy(lastAnalysis = analysis)
             if (analysis.malicious) {
                 maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
             }
             i++
-            if(i >= 10){
+            if(i >= MAX_ANALYSIS_PER_TICK){
                 // We want to avoid huge processing
                 break
             }
@@ -134,15 +153,19 @@ class APKCollector(
 
         i = 0
         for (modified in changedEntries) {
-            Log.d(TAG, "Processing ${i} of 10 : ${modified.packageName}")
-            val analysis = requestAPKAnalysis(modified.apkPath)
+            Log.d(TAG, "Processing ${i} of $MAX_ANALYSIS_PER_TICK : ${modified.packageName}")
+            val analysis = runCatching { requestAPKAnalysis(modified.apkPath) }
+                .getOrElse { error ->
+                    Log.w(TAG, "Analysis failed for ${modified.packageName}: ${error.message}")
+                    unavailableAnalysis(error)
+                }
             val index = newState.indexOf(modified)
             newState[index] = modified.copy(lastAnalysis = analysis)
             if (analysis.malicious) {
                 maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
             }
             i++
-            if(i >= 10){
+            if(i >= MAX_ANALYSIS_PER_TICK){
                 // We want to avoid huge processing
                 break
             }
@@ -194,36 +217,39 @@ class APKCollector(
     suspend fun requestAPKAnalysis(packagePath: String): APKAnalysis = withContext(Dispatchers.IO) {
         Log.d(TAG, "Requested APK Analysis for $packagePath")
         val filename = packagePath.substringAfterLast("/")
-        val localFile = File(appContext.cacheDir, filename)
-
-        adbManager.pullFile(remotePath = packagePath, destination = localFile)
-        lastPulledApk = localFile
-
-        val hashUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/hash")
-        val hashConnection = (hashUrl.openConnection() as java.net.HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 10_000
-            readTimeout = 60_000
-            setRequestProperty("Content-Type", "application/json")
-        }
+        var localFile: File? = null
 
         try {
-            val sha256Hash = sha256File(localFile)
+            val sha256Hash = computeRemoteSha256(packagePath)
+                ?: run {
+                    Log.w(TAG, "Remote SHA-256 unavailable for $packagePath, pulling APK to hash locally")
+                    val pulledFile = File(appContext.cacheDir, filename)
+                    try {
+                        adbManager.pullFile(remotePath = packagePath, destination = pulledFile)
+                    } catch (t: Throwable) {
+                        throw IOException("ADB pull failed for $packagePath", t)
+                    }
+                    localFile = pulledFile
+                    lastPulledApk = pulledFile
+                    sha256File(pulledFile)
+                }
 
             val hashBody = JSONObject()
                 .put("hash", sha256Hash)
                 .toString()
 
-            hashConnection.outputStream.bufferedWriter().use { it.write(hashBody) }
+            val hashRequest = Request.Builder()
+                .url("${MainActivity.SERVER_BASE_URL}/analysis/apk/hash")
+                .post(
+                    hashBody.toRequestBody(
+                        "application/json; charset=utf-8".toMediaType()
+                    )
+                )
+                .build()
 
-            val hashResponseBody = (
-                if (hashConnection.responseCode == 200) {
-                    hashConnection.inputStream
-                } else {
-                    hashConnection.errorStream
-                }
-            )?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val hashResponseBody = HTTP_CLIENT.newCall(hashRequest).execute().use { response ->
+                response.body?.string().orEmpty()
+            }
 
             Log.d(TAG, "ResponseBody : ${hashResponseBody}")
 
@@ -233,37 +259,38 @@ class APKCollector(
 
             // If the hash is not found on the API
             val responseBody = if (!hashFound) {
-                val boundary = "Boundary-${System.currentTimeMillis()}"
-                val fileUrl = java.net.URL("${MainActivity.SERVER_BASE_URL}/analysis/apk/file")
-                val fileConnection = (fileUrl.openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    setChunkedStreamingMode(0) // Prevent memory exhaustion & Android OS network crash on huge APK uploads
-                    connectTimeout = 10_000
-                    readTimeout = 300_000
-                    setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                if (localFile == null) {
+                    val pulledFile = File(appContext.cacheDir, filename)
+                    try {
+                        adbManager.pullFile(remotePath = packagePath, destination = pulledFile)
+                    } catch (t: Throwable) {
+                        throw IOException("ADB pull failed for upload $packagePath", t)
+                    }
+                    localFile = pulledFile
+                    lastPulledApk = pulledFile
                 }
 
-                try {
-                    fileConnection.outputStream.use { output ->
-                        output.write("--$boundary\r\n".toByteArray())
-                        output.write(
-                            "Content-Disposition: form-data; name=\"file\"; filename=\"${localFile.name}\"\r\n".toByteArray()
-                        )
-                        output.write("Content-Type: application/vnd.android.package-archive\r\n\r\n".toByteArray())
-                        localFile.inputStream().use { input -> input.copyTo(output) }
-                        output.write("\r\n--$boundary--\r\n".toByteArray())
-                    }
+                val fileRequestBody = localFile!!.asRequestBody(
+                    "application/vnd.android.package-archive".toMediaType()
+                )
+                val multipartBody = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("file", localFile!!.name, fileRequestBody)
+                    .build()
 
-                    (
-                        if (fileConnection.responseCode == 200) {
-                            fileConnection.inputStream
-                        } else {
-                            fileConnection.errorStream
-                        }
-                    )?.bufferedReader()?.use { it.readText() }.orEmpty()
-                } finally {
-                    fileConnection.disconnect()
+                val fileRequest = Request.Builder()
+                    .url("${MainActivity.SERVER_BASE_URL}/analysis/apk/file")
+                    .post(multipartBody)
+                    .build()
+
+                Log.d(TAG, "Uploading $packagePath and waiting for server verdict")
+
+                HTTP_CLIENT.newCall(fileRequest).execute().use { response ->
+                    val fileResponseBody = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        throw IOException("File analysis failed with HTTP ${response.code}: $fileResponseBody")
+                    }
+                    fileResponseBody
                 }
             } else {
                 hashResponseBody
@@ -272,8 +299,34 @@ class APKCollector(
             Log.d(TAG, responseBody)
             parseAPKAnalysis(responseBody)
         } finally {
-            hashConnection.disconnect()
+            if (localFile?.exists() == true && !localFile!!.delete()) {
+                Log.w(TAG, "Failed to delete cached APK ${localFile!!.absolutePath}")
+            }
+            if (lastPulledApk?.absolutePath == localFile?.absolutePath) {
+                lastPulledApk = null
+            }
         }
+    }
+
+    private suspend fun computeRemoteSha256(packagePath: String): String? {
+        val quotedPath = shellSingleQuote(packagePath)
+        val command = "sha256sum $quotedPath 2>/dev/null"
+        val output = adbManager.runCommand(command)
+        if (output.startsWith("Command failed:", ignoreCase = true)) {
+            return null
+        }
+        val firstLine = output.lineSequence().firstOrNull()?.trim().orEmpty()
+        val candidate = firstLine.substringBefore(' ').trim()
+        return if (candidate.matches(Regex("^[a-fA-F0-9]{64}$"))) {
+            candidate.lowercase()
+        } else {
+            null
+        }
+    }
+
+    private fun shellSingleQuote(value: String): String {
+        val escaped = value.replace("'", "'\"'\"'")
+        return "'$escaped'"
     }
 
     private fun parseAPKAnalysis(responseBody: String): APKAnalysis {
@@ -447,6 +500,18 @@ class APKCollector(
             result[key] = opt(key)
         }
         return result
+    }
+
+    private fun unavailableAnalysis(error: Throwable): APKAnalysis {
+        return APKAnalysis(
+            found = false,
+            analysisType = "error",
+            malicious = false,
+            degree = "unknown",
+            details = mapOf(
+                "reason" to (error.message ?: error.javaClass.simpleName)
+            )
+        )
     }
 
 }

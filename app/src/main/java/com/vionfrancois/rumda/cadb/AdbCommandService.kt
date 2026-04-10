@@ -21,7 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.IOException
+import java.net.SocketException
 
 private const val TAG = "AdbCommandService"
 
@@ -37,7 +37,7 @@ class AdbCommandService : Service() {
 
         fun startLoopIntent(
             context: Context,
-            intervalMs: Long = 60_000L
+            intervalMs: Long = 10_000L
         ): Intent {
             return Intent(context, AdbCommandService::class.java)
                 .setAction(ACTION_START_LOOP)
@@ -98,7 +98,7 @@ class AdbCommandService : Service() {
 
     private suspend fun runLoopTick() {
         try {
-            ensureConnected()
+            adbManager.autoConnect()
             Log.d(TAG, "Loop entry")
             val prefs = getSharedPreferences("rumda_prefs", Context.MODE_PRIVATE)
             val categories = prefs.getStringSet("monitoring_categories", emptySet())?.toSet().orEmpty()
@@ -137,12 +137,6 @@ class AdbCommandService : Service() {
             val msg = e.message ?: e.javaClass.simpleName
             updateNotification("Error: $msg")
         }
-    }
-
-    private fun ensureConnected() {
-        if (adbConnectionManager.isConnected) return
-        val connected = adbConnectionManager.connectTls(applicationContext, 5000)
-        if (!connected) throw IOException("Unable to connect to ADB over TLS")
     }
 
     private fun createNotificationChannel() {

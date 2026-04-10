@@ -44,6 +44,7 @@ dependencies {
     implementation(libs.libadb.android)
     implementation(libs.sun.security.android)
     implementation(libs.conscrypt.android)
+    implementation(libs.okhttp)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
