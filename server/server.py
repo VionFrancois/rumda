@@ -26,7 +26,10 @@ def analyze_apk_hash(payload: HashRequest) -> dict:
 
     try:
         verdict = format_hash_analysis(payload.hash, check_hash(payload.hash))
-        set_cached_verdict(payload.hash, verdict, CACHE_TTL_SECONDS)
+        if verdict.get("found", False):
+            set_cached_verdict(payload.hash, verdict, CACHE_TTL_SECONDS)
+        else:
+            print(f"/analysis/apk/hash skip cache: hash={payload.hash} not found on VirusTotal")
         return verdict
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -38,6 +41,9 @@ async def analyze_apk_file(file: UploadFile = File(...)) -> dict:
     try:
         content = await file.read()
         file_hash = hashlib.sha256(content).hexdigest()
+        cached = get_cached_verdict(file_hash)
+        if cached is not None:
+            return cached
 
         with NamedTemporaryFile(delete=False, suffix=".apk") as tmp:
             tmp_path = Path(tmp.name)
@@ -92,15 +98,20 @@ def format_hash_analysis(file_hash: str, result: dict) -> dict:
 
 
 def format_file_analysis(file_hash: str, result: dict) -> dict:
-    malicious = bool(result.get("malicious", False))
     threat_level = result.get("threat_level", "Unknown")
-    total_score = int(result.get("total_score", 0) or 0)
-    normalized_threat_level = threat_level.strip().lower()
-    degree = {
-        "high risk": "high",
-        "moderate risk": "medium",
-        "low risk": "low",
-    }.get(normalized_threat_level, "none" if not malicious else "medium")
+    weighted_sum = float(result.get("weighted_sum", 0) or 0)
+
+    # TODO : Define better thresholds ?
+    malicious = weighted_sum >= 4
+
+    if weighted_sum >= 8:
+        degree = "high"
+    elif weighted_sum >= 4:
+        degree = "medium"
+    elif weighted_sum > 0:
+        degree = "low"
+    else:
+        degree = "none"
 
     return {
         "found": True,
@@ -109,6 +120,7 @@ def format_file_analysis(file_hash: str, result: dict) -> dict:
         "degree": degree,
         "details": {
             "hash": file_hash,
-            "total_score": total_score
+            "threat_level": threat_level,
+            "total_score": round(weighted_sum, 2),
         },
     }
