@@ -12,7 +12,8 @@ import android.os.IBinder
 import android.util.Log
 import com.vionfrancois.rumda.R
 import com.vionfrancois.rumda.collectors.APKCollector
-import com.vionfrancois.rumda.collectors.StateCollector
+import com.vionfrancois.rumda.collectors.Collector
+import com.vionfrancois.rumda.collectors.IPCollector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -102,7 +103,7 @@ class AdbCommandService : Service() {
             Log.d(TAG, "Loop entry")
             val prefs = getSharedPreferences("rumda_prefs", Context.MODE_PRIVATE)
             val categories = prefs.getStringSet("monitoring_categories", emptySet())?.toSet().orEmpty()
-            val collectors = mutableListOf<StateCollector>()
+            val collectors = mutableListOf<Collector>()
             val collectorNames = mutableListOf<String>()
 
             for (category in categories) {
@@ -111,10 +112,10 @@ class AdbCommandService : Service() {
                         collectors.add(APKCollector(adbManager, applicationContext))
                         collectorNames.add("APKS")
                     }
-//                    "IPS" -> {
-//                        collectors.add(IPSCollector(adbManager, applicationContext))
-//                        collectorNames.add("IPS")
-//                    }
+                    "IPS" -> {
+                        collectors.add(IPCollector(adbManager, applicationContext))
+                        collectorNames.add("IPS")
+                    }
 //                    "SERVICES" -> {
 //                        collectors.add(ServicesCollector(adbManager, applicationContext))
 //                        collectorNames.add("SERVICES")
