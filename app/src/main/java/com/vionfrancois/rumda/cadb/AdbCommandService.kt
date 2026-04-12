@@ -14,6 +14,7 @@ import com.vionfrancois.rumda.R
 import com.vionfrancois.rumda.collectors.APKCollector
 import com.vionfrancois.rumda.collectors.Collector
 import com.vionfrancois.rumda.collectors.IPCollector
+import com.vionfrancois.rumda.threats.ThreatStoring
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,12 +56,14 @@ class AdbCommandService : Service() {
     private var currentIntervalMs: Long = 60_000L
     private lateinit var adbConnectionManager: AdbConnectionManager
     private lateinit var adbManager: AdbManager
+    private lateinit var threatStoring: ThreatStoring
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         adbConnectionManager = AdbConnectionManager.getInstance(applicationContext) as AdbConnectionManager
         adbManager = AdbManager(applicationContext)
+        threatStoring = ThreatStoring(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -99,7 +102,6 @@ class AdbCommandService : Service() {
 
     private suspend fun runLoopTick() {
         try {
-            adbManager.autoConnect()
             Log.d(TAG, "Loop entry")
             val prefs = getSharedPreferences("rumda_prefs", Context.MODE_PRIVATE)
             val categories = prefs.getStringSet("monitoring_categories", emptySet())?.toSet().orEmpty()
@@ -109,11 +111,11 @@ class AdbCommandService : Service() {
             for (category in categories) {
                 when (category) {
                     "APKS" -> {
-                        collectors.add(APKCollector(adbManager, applicationContext))
+                        collectors.add(APKCollector(adbManager, applicationContext, threatStoring))
                         collectorNames.add("APKS")
                     }
                     "IPS" -> {
-                        collectors.add(IPCollector(adbManager, applicationContext))
+                        collectors.add(IPCollector(adbManager, applicationContext, threatStoring))
                         collectorNames.add("IPS")
                     }
 //                    "SERVICES" -> {
@@ -187,6 +189,9 @@ class AdbCommandService : Service() {
         stopLoop()
         serviceScope.cancel()
         adbManager.cleanup()
+        if (::threatStoring.isInitialized) {
+            threatStoring.close()
+        }
         super.onDestroy()
     }
 

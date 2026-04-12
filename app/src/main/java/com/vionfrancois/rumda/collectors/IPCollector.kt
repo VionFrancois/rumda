@@ -21,11 +21,11 @@ import java.util.concurrent.TimeUnit
 class IPCollector(
     private val adbManager: AdbManager,
     context: Context,
+    private val threatStoring: ThreatStoring,
 ) : EventCollector() {
 
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val threatStoring = ThreatStoring(appContext)
     private val threatNotificationHelper = ThreatNotificationHelper(appContext)
 
     private data class NetEvent(
@@ -117,6 +117,8 @@ class IPCollector(
                         malicious = cached.optBoolean("malicious"),
                         degree = cached.optString("degree"),
                     )
+                } else {
+                    ipsToQuery.add(ip)
                 }
             } else {
                 ipsToQuery.add(ip)
@@ -143,8 +145,8 @@ class IPCollector(
         for (i in 0 until eventArray.length()) {
             val event = eventArray.optJSONObject(i)
             val ip = event.optString("ip").trim()
-            val verdict = activeCache[ip]
-            if(verdict!!.malicious){
+            val verdict = activeCache[ip] ?: continue
+            if (verdict.malicious) {
                 val uid =event.optInt("uid")
                 val packages = if (uid >= 0) resolvePackagesByUid(uid) else emptyList()
 
@@ -314,6 +316,8 @@ class IPCollector(
 
     private suspend fun requestRemoteVerdicts(ips: List<String>): List<Verdict> {
         if (ips.isEmpty()) return emptyList()
+
+        Log.d(TAG, "Querying IP analysis for ${ips.size} IP(s)")
 
         val payload = JSONObject()
             .put("ips", JSONArray(ips))

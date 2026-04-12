@@ -6,6 +6,7 @@ import com.vionfrancois.rumda.MainActivity
 import com.vionfrancois.rumda.cadb.AdbManager
 import com.vionfrancois.rumda.threats.ThreatKind
 import com.vionfrancois.rumda.threats.ThreatNotificationHelper
+import com.vionfrancois.rumda.threats.ThreatRecord
 import com.vionfrancois.rumda.threats.ThreatStoring
 import com.vionfrancois.rumda.threats.ThreatSeverity
 import kotlinx.coroutines.Dispatchers
@@ -25,12 +26,12 @@ import java.util.concurrent.TimeUnit
 
 class APKCollector(
     private val adbManager: AdbManager,
-    context: Context
+    context: Context,
+    private val threatStoring: ThreatStoring,
 ) : StateCollector() {
 
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("apk_collector_state", Context.MODE_PRIVATE)
-    private val threatStoring = ThreatStoring(appContext)
     private val threatNotificationHelper = ThreatNotificationHelper(appContext)
     private var lastCollectedRaw: String? = null
     private var lastCollectedEntries: List<PackageEntry> = emptyList()
@@ -128,13 +129,13 @@ class APKCollector(
         return normalizedEntries
     }
 
-    override suspend fun pushDiffToRemote(oldState: List<PackageEntry>, newState: MutableList<PackageEntry>): Pair<MutableList<String>, MutableList<PackageEntry>> {
+    override suspend fun pushDiffToRemote(oldState: List<PackageEntry>, newState: MutableList<PackageEntry>): Pair<List<ThreatRecord>, MutableList<PackageEntry>> {
         recoverAnalysesFromPreviousState(oldState, newState)
 
         // Find changes
         val (addedEntries, changedEntries) = diffStates(oldState, newState)
 
-        val maliciousVerdict = mutableListOf<String>()
+        val threats = mutableListOf<ThreatRecord>()
 
         var i = 0
         // Ask analysis for changed APK
@@ -148,7 +149,12 @@ class APKCollector(
             val index = newState.indexOf(added)
             newState[index] = added.copy(lastAnalysis = analysis)
             if (analysis?.malicious == true) {
-                maliciousVerdict.add("${added.packageName} : ${analysis.degree}")
+                threats.add(
+                    buildApkThreat(
+                        packageName = added.packageName,
+                        rawDegree = analysis.degree,
+                    )
+                )
             }
             i++
             if(i >= MAX_ANALYSIS_PER_TICK){
@@ -168,7 +174,12 @@ class APKCollector(
             val index = newState.indexOf(modified)
             newState[index] = modified.copy(lastAnalysis = analysis)
             if (analysis?.malicious == true) {
-                maliciousVerdict.add("${modified.packageName} : ${analysis.degree}")
+                threats.add(
+                    buildApkThreat(
+                        packageName = modified.packageName,
+                        rawDegree = analysis.degree,
+                    )
+                )
             }
             i++
             if(i >= MAX_ANALYSIS_PER_TICK){
@@ -177,7 +188,7 @@ class APKCollector(
             }
         }
 
-        return Pair(maliciousVerdict, newState)
+        return Pair(threats, newState)
     }
 
     private fun recoverAnalysesFromPreviousState(
@@ -200,32 +211,24 @@ class APKCollector(
         }
     }
 
-    override suspend fun handleVerdict(response: MutableList<String>) {
-        if (response.isNotEmpty()) {
-            val threatCandidates = response.mapNotNull { verdictLine ->
-                val packageName = verdictLine.substringBefore(":").trim()
-                if (packageName.isBlank()) return@mapNotNull null
+    override suspend fun handleVerdict(response: List<ThreatRecord>) {
+        if (response.isEmpty()) return
 
-                val rawDegree = verdictLine.substringAfter(":", "UNKNOWN").trim()
-                threatStoring.buildThreat(
-                    kind = ThreatKind.APK,
-                    title = packageName,
-                    summary = "Potential malicious APK detected",
-                    severity = mapDegreeToSeverity(rawDegree),
-                    sourceCollector = "APKS",
-                    attributes = mapOf(
-                        "packageName" to packageName,
-                        "degree" to rawDegree,
-                        "rawVerdict" to verdictLine,
-                    ),
-                )
-            }
-
-            val insertedThreatCount = threatStoring.addActiveThreats(threatCandidates)
-            if (insertedThreatCount > 0) {
-                threatNotificationHelper.notifyThreatDetected(insertedThreatCount)
-            }
+        val insertedThreatCount = threatStoring.addActiveThreats(response)
+        if (insertedThreatCount > 0) {
+            threatNotificationHelper.notifyThreatDetected(insertedThreatCount)
         }
+    }
+
+    private fun buildApkThreat(packageName: String, rawDegree: String): ThreatRecord {
+        return threatStoring.buildThreat(
+            kind = ThreatKind.APK,
+            title = packageName,
+            summary = "Potential malicious APK detected",
+            severity = mapDegreeToSeverity(rawDegree),
+            sourceCollector = "APKS",
+            attributes = emptyMap(), // TODO : Add report ?
+        )
     }
 
     private fun mapDegreeToSeverity(rawDegree: String): ThreatSeverity {
@@ -233,7 +236,7 @@ class APKCollector(
         return when {
             normalized.contains("CRIT") -> ThreatSeverity.CRITICAL
             normalized.contains("HIGH") -> ThreatSeverity.HIGH
-            normalized.contains("MED") -> ThreatSeverity.MEDIUM
+            normalized.contains("MEDIUM") -> ThreatSeverity.MEDIUM
             normalized.contains("LOW") -> ThreatSeverity.LOW
             else -> ThreatSeverity.MEDIUM
         }

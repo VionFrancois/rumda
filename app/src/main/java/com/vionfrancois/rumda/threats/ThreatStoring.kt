@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
-class ThreatStoring(context: Context) {
+class ThreatStoring(context: Context) : AutoCloseable {
 
     companion object {
         private const val DB_NAME = "threat_store.db"
@@ -33,6 +33,11 @@ class ThreatStoring(context: Context) {
     }
 
     private val dbHelper = ThreatDbHelper(context.applicationContext)
+
+    @Synchronized
+    override fun close() {
+        dbHelper.close()
+    }
 
     @Synchronized
     fun getActiveThreats(): List<ThreatRecord> {

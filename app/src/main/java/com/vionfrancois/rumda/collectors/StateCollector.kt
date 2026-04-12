@@ -1,6 +1,7 @@
 package com.vionfrancois.rumda.collectors
 
 import com.vionfrancois.rumda.collectors.APKCollector.PackageEntry
+import com.vionfrancois.rumda.threats.ThreatRecord
 
 abstract class StateCollector : Collector {
     abstract fun fetchLastState(): Pair<List<PackageEntry>, Boolean>
@@ -8,8 +9,8 @@ abstract class StateCollector : Collector {
     abstract suspend fun pushDiffToRemote(
         oldState: List<PackageEntry>,
         newState: MutableList<PackageEntry>
-    ): Pair<MutableList<String>, MutableList<PackageEntry>>
-    abstract suspend fun handleVerdict(response: MutableList<String>)
+    ): Pair<List<ThreatRecord>, MutableList<PackageEntry>>
+    abstract suspend fun handleVerdict(response: List<ThreatRecord>)
     abstract fun saveState(state: List<PackageEntry>)
 
     override suspend fun run() {
@@ -17,8 +18,8 @@ abstract class StateCollector : Collector {
         var state  = collectState()
 
         if (lastState != state || !isComplete) {
-            val (verdict, state) = pushDiffToRemote(lastState, state.toMutableList())
-            handleVerdict(verdict)
+            val (threats, state) = pushDiffToRemote(lastState, state.toMutableList())
+            handleVerdict(threats)
             saveState(state)
         }
     }

@@ -55,6 +55,13 @@ class ThreatsActivity : AppCompatActivity() {
         renderThreats()
     }
 
+    override fun onDestroy() {
+        if (::threatStoring.isInitialized) {
+            threatStoring.close()
+        }
+        super.onDestroy()
+    }
+
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         if (::swipeGestureDetector.isInitialized) {
             swipeGestureDetector.onTouchEvent(ev)
