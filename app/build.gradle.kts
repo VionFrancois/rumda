@@ -42,6 +42,7 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.libadb.android)
+    implementation(libs.spake2.android)
     implementation(libs.sun.security.android)
     implementation(libs.conscrypt.android)
     implementation(libs.okhttp)
