@@ -6,14 +6,13 @@ RUN apt-get update && apt-get install -y git cron && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-
 COPY server.py ./server.py
 COPY cache_store.py ./cache_store.py
 COPY quark_analysis.py ./quark_analysis.py
 COPY virustotal.py ./virustotal.py
+COPY abuseipdb.py ./abuseipdb.py
+COPY abuseipdb-api-key ./abuseipdb-api-key
 COPY virustotal-api-key ./virustotal-api-key
-COPY certs/cert.pem ./certs/cert.pem
-COPY certs/key.pem ./certs/key.pem
 
 RUN git clone https://github.com/quark-engine/quark-rules ./quark-rules
 
