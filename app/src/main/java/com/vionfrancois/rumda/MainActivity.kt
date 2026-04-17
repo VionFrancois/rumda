@@ -27,7 +27,7 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
     companion object {
-        const val SERVER_BASE_URL = "http://10.0.2.2:8000"
+        const val SERVER_BASE_URL = "https://rumda.ig.umons.ac.be/rumda-api"
         private const val PREFS_NAME = "rumda_prefs"
         private const val PREF_ONBOARDING_COMPLETED = "onboarding_completed"
         private const val PREF_MONITORING_CATEGORIES = "monitoring_categories"
