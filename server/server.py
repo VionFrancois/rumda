@@ -138,6 +138,7 @@ async def analyze_apk_file(file: UploadFile = File(...)) -> dict:
             verdict = format_file_analysis(file_hash, result)
             verdict["details"]["source"] = "quark"
             verdict["details"]["file_size_bytes"] = total_size
+            print("Finished file analysis via quark")
 
         set_cached_verdict(file_hash, verdict, CACHE_TTL_SECONDS)
         return verdict
