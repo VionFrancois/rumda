@@ -9,11 +9,15 @@ from pydantic import BaseModel, field_validator
 from abuseipdb import check_ip
 from cache_store import *
 from quark_analysis import analyze_apk_with_quark
-from virustotal import check_hash
+from virustotal import check_hash, upload_and_analyze_file
 
 app = FastAPI(title="RuMDA API")
 CACHE_TTL_SECONDS = 60 * 60 * 24 * 14 # 14 days
 IP_CACHE_TTL_SECONDS = 60 * 60 * 12 # 12 hours
+FILE_UPLOAD_VT_THRESHOLD_BYTES = 100 * 1024 * 1024 # 100MB
+FILE_UPLOAD_MAX_SUPPORTED_BYTES = 650 * 1024 * 1024 # 650MB
+VT_UPLOAD_TIMEOUT_SECONDS: int | None = None
+VT_ANALYSIS_TIMEOUT_SECONDS = 60 * 10 # 10 minutes
 init_cache_db()
 
 
@@ -85,28 +89,66 @@ def analyze_ips(payload: IpsRequest) -> dict:
 
 @app.post("/analysis/apk/file")
 async def analyze_apk_file(file: UploadFile = File(...)) -> dict:
-    # TODO : Ensure the uploaded file is a valid APK
+    tmp_path: Path | None = None
+
     try:
         content = await file.read()
+        total_size = len(content)
         file_hash = hashlib.sha256(content).hexdigest()
+
         cached = get_cached_verdict(file_hash)
         if cached is not None:
             return cached
 
+        # VirusTotal has a file upload limit of 650MB
+        if total_size > FILE_UPLOAD_MAX_SUPPORTED_BYTES:
+            verdict = {
+                "found": False,
+                "analysis_type": "file",
+                "malicious": False,
+                "degree": "unknown",
+                "details": {
+                    "hash": file_hash,
+                    "reason": "file_too_large",
+                    "max_supported_size_bytes": FILE_UPLOAD_MAX_SUPPORTED_BYTES,
+                    "file_size_bytes": total_size,
+                },
+            }
+            set_cached_verdict(file_hash, verdict, CACHE_TTL_SECONDS)
+            return verdict
+
         with NamedTemporaryFile(delete=False, suffix=".apk") as tmp:
             tmp_path = Path(tmp.name)
             tmp.write(content)
-            result = analyze_apk_with_quark(str(tmp_path))
 
-        verdict = format_file_analysis(file_hash, result)
+        if total_size > FILE_UPLOAD_VT_THRESHOLD_BYTES:
+            result = upload_and_analyze_file(
+                file_path=str(tmp_path),
+                file_hash=file_hash,
+                upload_timeout_seconds=VT_UPLOAD_TIMEOUT_SECONDS,
+                timeout_seconds=VT_ANALYSIS_TIMEOUT_SECONDS,
+                poll_interval_seconds=10,
+            )
+            verdict = format_hash_analysis(file_hash, result)
+            verdict["analysis_type"] = "file"
+            verdict["details"]["source"] = "virustotal"
+            verdict["details"]["file_size_bytes"] = total_size
+        else:
+            result = analyze_apk_with_quark(str(tmp_path))
+            verdict = format_file_analysis(file_hash, result)
+            verdict["details"]["source"] = "quark"
+            verdict["details"]["file_size_bytes"] = total_size
+
         set_cached_verdict(file_hash, verdict, CACHE_TTL_SECONDS)
         return verdict
-    
+
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"APK analysis failed: {exc}") from exc
     finally:
         await file.close()
-        if "tmp_path" in locals() and tmp_path.exists():
+        if tmp_path is not None and tmp_path.exists():
             tmp_path.unlink()
 
 
