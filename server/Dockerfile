@@ -15,6 +15,7 @@ COPY abuseipdb-api-key ./abuseipdb-api-key
 COPY virustotal-api-key ./virustotal-api-key
 
 RUN git clone https://github.com/quark-engine/quark-rules ./quark-rules
+RUN mkdir -p /data
 
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh

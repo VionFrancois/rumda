@@ -3,10 +3,16 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "cache.db"
+DB_PATH = Path("/data/cache.db")
+
+
+def ensure_db_parent_dir() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def init_cache_db() -> None:
+    ensure_db_parent_dir()
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
